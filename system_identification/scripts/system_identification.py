@@ -994,6 +994,186 @@ class SystemIdentification:
         if self.direct_motors:
             print(f"Direct motors: {sorted(self.direct_motors)}")
 
+    def save_torch(self, output_file: str) -> None:
+        """Save collected data in PyTorch .pt format (compatible with Isaac sim scripts).
+        
+        Output format matches Isaac sim chirp script exactly:
+            {
+                "time": tensor (num_samples,) - timestamps
+                "dof_pos": tensor (num_samples, num_joints) - measured positions  
+                "des_dof_pos": tensor (num_samples, num_joints) - commanded positions
+                "joint_ids": list[int] - motor CAN IDs in column order
+            }
+        """
+        try:
+            import torch
+        except ImportError:
+            print("Warning: PyTorch not installed, skipping .pt save")
+            return
+        
+        # Get all motor data aligned by sample index
+        # Find common samples across all motors
+        sample_sets = []
+        for can_id in self.motor_ids:
+            motor_data = self.feedback_data.get(can_id, [])
+            if motor_data:
+                sample_sets.append({d["sample"] for d in motor_data})
+        
+        if not sample_sets:
+            print("Warning: No feedback data to save")
+            return
+        
+        # Find samples that exist for ALL motors
+        common_samples = sorted(set.intersection(*sample_sets))
+        num_samples = len(common_samples)
+        num_joints = len(self.motor_ids)
+        
+        if num_samples == 0:
+            print("Warning: No common samples across all motors")
+            return
+        
+        # Build lookup dictionaries for each motor
+        motor_lookups = {}
+        for can_id in self.motor_ids:
+            motor_data = self.feedback_data.get(can_id, [])
+            motor_lookups[can_id] = {d["sample"]: d for d in motor_data}
+        
+        # Pre-allocate tensors (matching Isaac sim format exactly)
+        time_data = torch.zeros(num_samples)
+        dof_pos = torch.zeros(num_samples, num_joints)
+        des_dof_pos = torch.zeros(num_samples, num_joints)
+        
+        # Fill tensors - each motor is a column (DOF)
+        for i, sample_idx in enumerate(common_samples):
+            # Time from first motor (should be same for all)
+            first_motor = self.motor_ids[0]
+            time_data[i] = motor_lookups[first_motor][sample_idx]["timestamp"]
+            
+            # Each motor is a joint/DOF
+            for j, can_id in enumerate(self.motor_ids):
+                d = motor_lookups[can_id][sample_idx]
+                dof_pos[i, j] = d["angle"]
+                des_dof_pos[i, j] = d["commanded_angle"]
+        
+        # Save in Isaac sim compatible format
+        data = {
+            "time": time_data,
+            "dof_pos": dof_pos,
+            "des_dof_pos": des_dof_pos,
+            "joint_ids": self.motor_ids,  # Motor CAN IDs as joint order
+        }
+        
+        torch.save(data, output_file)
+        print(f"Torch data saved to: {output_file}")
+        print(f"  Shape: time={tuple(time_data.shape)}, dof_pos={tuple(dof_pos.shape)}, des_dof_pos={tuple(des_dof_pos.shape)}")
+        print(f"  Joint IDs (column order): {self.motor_ids}")
+
+    def save_plots(self, output_dir: str) -> None:
+        """Save plots for each motor and IK group"""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Warning: matplotlib not installed, skipping plots")
+            return
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        print(f"\nSaving plots to {output_path}...")
+        
+        # Plot each motor
+        for can_id in self.motor_ids:
+            motor_data = self.feedback_data.get(can_id, [])
+            if not motor_data:
+                continue
+            
+            timestamps = [d["timestamp"] for d in motor_data]
+            positions = [d["angle"] for d in motor_data]
+            commanded = [d["commanded_angle"] for d in motor_data]
+            
+            plt.figure(figsize=(12, 6))
+            plt.plot(timestamps, positions, label="Measured", linewidth=1)
+            plt.plot(timestamps, commanded, label="Commanded", linestyle='dashed', linewidth=1)
+            plt.title(f"Motor {can_id} - Position Tracking")
+            plt.xlabel("Time [s]")
+            plt.ylabel("Position [rad]")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            
+            plot_file = output_path / f"motor_{can_id}_{timestamp}.png"
+            plt.savefig(plot_file, dpi=150)
+            plt.close()
+            print(f"  Saved: {plot_file.name}")
+        
+        # Plot FK for IK groups
+        if self.ik_generators:
+            for group_name, ik_gen in self.ik_generators.items():
+                group_motor_ids = []
+                for mid, (gname, idx) in self.motor_to_ik_group.items():
+                    if gname == group_name:
+                        group_motor_ids.append((idx, mid))
+                group_motor_ids.sort()
+                motor_ids_ordered = [mid for _, mid in group_motor_ids]
+                
+                if ik_gen.ik_type == "foot" and len(motor_ids_ordered) == 2:
+                    lower_data = self.feedback_data.get(motor_ids_ordered[0], [])
+                    upper_data = self.feedback_data.get(motor_ids_ordered[1], [])
+                    
+                    if lower_data and upper_data:
+                        lower_by_sample = {d["sample"]: d for d in lower_data}
+                        upper_by_sample = {d["sample"]: d for d in upper_data}
+                        common_samples = sorted(set(lower_by_sample.keys()) & set(upper_by_sample.keys()))
+                        
+                        timestamps, pitches, rolls = [], [], []
+                        cmd_pitches, cmd_rolls = [], []
+                        
+                        for sample_idx in common_samples:
+                            q_lower = lower_by_sample[sample_idx]["angle"]
+                            q_upper = upper_by_sample[sample_idx]["angle"]
+                            pitch, roll = fk_motor_to_foot(q_lower, q_upper)
+                            
+                            timestamps.append(lower_by_sample[sample_idx]["timestamp"])
+                            pitches.append(np.degrees(pitch))
+                            rolls.append(np.degrees(roll))
+                            cmd_p = lower_by_sample[sample_idx].get("commanded_pitch")
+                            cmd_r = lower_by_sample[sample_idx].get("commanded_roll")
+                            cmd_pitches.append(np.degrees(cmd_p) if cmd_p else 0.0)
+                            cmd_rolls.append(np.degrees(cmd_r) if cmd_r else 0.0)
+                        
+                        # Pitch plot
+                        plt.figure(figsize=(12, 6))
+                        plt.plot(timestamps, pitches, label="Measured", linewidth=1)
+                        plt.plot(timestamps, cmd_pitches, label="Commanded", linestyle='dashed', linewidth=1)
+                        plt.title(f"{group_name} - Pitch (FK)")
+                        plt.xlabel("Time [s]")
+                        plt.ylabel("Pitch [deg]")
+                        plt.grid(True, alpha=0.3)
+                        plt.legend()
+                        plt.tight_layout()
+                        plot_file = output_path / f"{group_name}_pitch_{timestamp}.png"
+                        plt.savefig(plot_file, dpi=150)
+                        plt.close()
+                        print(f"  Saved: {plot_file.name}")
+                        
+                        # Roll plot
+                        plt.figure(figsize=(12, 6))
+                        plt.plot(timestamps, rolls, label="Measured", linewidth=1)
+                        plt.plot(timestamps, cmd_rolls, label="Commanded", linestyle='dashed', linewidth=1)
+                        plt.title(f"{group_name} - Roll (FK)")
+                        plt.xlabel("Time [s]")
+                        plt.ylabel("Roll [deg]")
+                        plt.grid(True, alpha=0.3)
+                        plt.legend()
+                        plt.tight_layout()
+                        plot_file = output_path / f"{group_name}_roll_{timestamp}.png"
+                        plt.savefig(plot_file, dpi=150)
+                        plt.close()
+                        print(f"  Saved: {plot_file.name}")
+        
+        print(f"Plots saved to: {output_path}")
+
     def cleanup(self) -> None:
         """Stop all motors and close CAN controller"""
         print("\nStopping motors...")
@@ -1094,7 +1274,19 @@ To add new IK types, use IKRegistry.register() in your code.
         "-s",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Save results to output file (default: True). Use --no-save to disable.",
+        help="Save results to JSON file (default: True). Use --no-save to disable.",
+    )
+    parser.add_argument(
+        "--save-plots",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save plots for each motor/joint (default: False). Use --save-plots to enable.",
+    )
+    parser.add_argument(
+        "--save-torch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save data in PyTorch .pt format (default: False). Use --save-torch to enable.",
     )
     parser.add_argument(
         "--list-ik",
@@ -1114,9 +1306,7 @@ To add new IK types, use IKRegistry.register() in your code.
 
     if not Path(args.config).exists():
         print(f"Error: Config file not found: {args.config}")
-        print("Creating example config file...")
-        create_example_config(args.config, motor_ids=args.motors)
-        return
+        sys.exit(1)
 
     if args.list_motors:
         with Path(args.config).open() as f:
@@ -1130,14 +1320,30 @@ To add new IK types, use IKRegistry.register() in your code.
     try:
         sysid.setup()
         sysid.run_identification()
+        
+        # Generate timestamp for all output files
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(args.output)
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save JSON results
         if args.save:
-            # Add timestamp to output filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = Path(args.output)
-            output_file = output_path.parent / f"{output_path.stem}_{timestamp}{output_path.suffix}"
+            output_file = output_dir / f"{output_path.stem}_{timestamp}{output_path.suffix}"
             sysid.save_results(str(output_file))
         else:
-            print("\nResults not saved (--no-save specified)")
+            print("\nJSON results not saved (--no-save specified)")
+        
+        # Save PyTorch format
+        if args.save_torch:
+            torch_file = output_dir / f"{output_path.stem}_{timestamp}.pt"
+            sysid.save_torch(str(torch_file))
+        
+        # Save plots
+        if args.save_plots:
+            plots_dir = output_dir / f"plots_{timestamp}"
+            sysid.save_plots(str(plots_dir))
+            
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     except Exception as e:
@@ -1145,74 +1351,6 @@ To add new IK types, use IKRegistry.register() in your code.
         traceback.print_exc()
     finally:
         sysid.cleanup()
-
-
-def create_example_config(filename: str, motor_ids: list[int] | None = None) -> None:
-    """Create example configuration file"""
-    # Default to motors 0-5 if none specified
-    if motor_ids is None:
-        motor_ids = [0, 1, 2, 3, 4, 5]
-
-    example_config = {
-        "can_interface": {
-            "interface": "socketcan",
-            "channel": "can0",
-            "bitrate": 5000000,
-            "fd": True,
-        },
-        "chirp": {
-            "f_start": 0.1,
-            "f_end": 10.0,
-            "duration": 20.0,
-            "sample_rate": 650.0,
-            "sweep_type": "linear",
-        },
-        "control_parameters": {
-            "velocity": 0.0,
-            "effort": 0.0,
-            "stiffness": 1.0,
-            "damping": 0.0,
-        },
-        # All motor CAN IDs to identify
-        "motor_ids": motor_ids,
-        # Per-motor configuration for DIRECT control (motors not in ik_groups)
-        # All joints use: q(t) = scale * direction * (s(t) + bias)
-        "motors": {str(i): {"scale": 1.0, "direction": 1.0, "bias": 0.0} for i in motor_ids},
-        # IK groups: motors controlled via inverse kinematics
-        # Each IK input is treated as a 1-DOF joint with the same formula
-        "ik_groups": [
-            # Example: left foot with motors 0 (lower) and 1 (upper)
-            # {
-            #     "name": "left_foot",
-            #     "ik_type": "foot",
-            #     "motor_ids": [0, 1],
-            #     "chirp": {
-            #         "scale_pitch": 0.25,
-            #         "direction_pitch": 1.0,
-            #         "bias_pitch": 0.0,
-            #         "scale_roll": 0.25,
-            #         "direction_roll": 1.0,
-            #         "bias_roll": 0.0
-            #     }
-            # },
-        ],
-    }
-
-    with Path(filename).open("w") as f:
-        json.dump(example_config, f, indent=2)
-
-    print(f"Example config created: {filename}")
-    print(f"Motor IDs: {motor_ids}")
-    print()
-    print("All joints (direct or IK) use the same formula:")
-    print("  q(t) = scale * direction * (s(t) + bias)")
-    print()
-    print("Where s(t) is the base chirp signal ranging -1 to +1:")
-    print("  - Effective amplitude = |scale * direction|")
-    print("  - Effective offset = scale * direction * bias")
-    print()
-    print("Edit this file to configure IK groups or direct motor control.")
-    print("Run with --list-ik to see available IK functions.")
 
 
 if __name__ == "__main__":

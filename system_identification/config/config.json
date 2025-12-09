@@ -9,7 +9,7 @@
         "f_start": 0.1,
         "f_end": 10.0,
         "duration": 20.0,
-        "sample_rate": 650.0,
+        "sample_rate": 500.0,
         "sweep_type": "linear"
     },
     "control_parameters": {
