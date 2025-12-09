@@ -703,13 +703,20 @@ class SystemIdentification:
         - If communication takes longer than target period, we proceed immediately
           (no "catching up" - that would violate CAN protocol)
         - Track and warn if requested rate is unachievable
+        - If sample_rate is 0 or not set, run as fast as possible (no rate limiting)
         """
         control_params = self.config["control_parameters"]
         chirp_config = self.config["chirp"]
         expected_rate = chirp_config["sample_rate"]
+        # rate_limit: True (default) = limit to sample_rate, False = run as fast as possible
+        rate_limited = chirp_config.get("rate_limit", True)
 
         print("\nStarting system identification...")
-        print(f"Requested rate: {expected_rate} Hz")
+        if rate_limited:
+            print(f"Requested rate: {expected_rate} Hz")
+        else:
+            print(f"Rate limiting: DISABLED (running as fast as possible)")
+            print(f"Signal has {int(expected_rate * chirp_config['duration'])} samples")
         print(f"Duration: {chirp_config['duration']} seconds")
         print(f"Frequency sweep: {chirp_config['f_start']} - {chirp_config['f_end']} Hz")
         print(f"Motor CAN IDs: {self.motor_ids}")
@@ -735,8 +742,12 @@ class SystemIdentification:
         missed_deadlines = 0
 
         # Rate limiting setup
-        target_period = 1.0 / expected_rate
-        feedback_timeout = target_period * 2  # Allow 2x target period for feedback
+        if rate_limited:
+            target_period = 1.0 / expected_rate
+            feedback_timeout = target_period * 2  # Allow 2x target period for feedback
+        else:
+            target_period = 0.0
+            feedback_timeout = 0.01  # 10ms default timeout when not rate limiting
         last_send_time = time.time()
 
         while not is_complete:
@@ -824,19 +835,20 @@ class SystemIdentification:
 
             # Rate limiting: maintain minimum period between sends
             # Don't try to "catch up" - CAN requires waiting for response
-            elapsed_since_last = time.time() - last_send_time
-            sleep_time = target_period - elapsed_since_last
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            else:
-                # We're running slower than requested rate
-                missed_deadlines += 1
+            if rate_limited:
+                elapsed_since_last = time.time() - last_send_time
+                sleep_time = target_period - elapsed_since_last
+                
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    # We're running slower than requested rate
+                    missed_deadlines += 1
             
             last_send_time = time.time()
 
             # Check if requested rate is achievable (after first 10 samples)
-            if self.sample_count == 10 and not rate_warning_issued:
+            if rate_limited and self.sample_count == 10 and not rate_warning_issued:
                 avg_loop_time = np.mean(loop_times)
                 max_achievable_rate = 1.0 / avg_loop_time if avg_loop_time > 0 else float('inf')
                 
@@ -884,11 +896,14 @@ class SystemIdentification:
             print(f"Direct motors: {sorted(self.direct_motors)}")
         print(f"Samples: {self.sample_count}")
         print(f"Duration: {elapsed:.2f} seconds")
-        print(f"Requested rate: {expected_rate} Hz")
+        if rate_limited:
+            print(f"Requested rate: {expected_rate} Hz")
+        else:
+            print("Rate limiting: DISABLED")
         print(f"Actual rate: {actual_rate:.1f} Hz")
         print(f"Average loop time: {avg_loop_time_ms:.2f} ms (CAN round-trip)")
         
-        if missed_deadlines > 0:
+        if rate_limited and missed_deadlines > 0:
             missed_pct = (missed_deadlines / self.sample_count) * 100
             print(f"⚠️  Missed deadlines: {missed_deadlines}/{self.sample_count} ({missed_pct:.1f}%)")
             print(f"    Requested rate was higher than CAN bus can sustain.")
