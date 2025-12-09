@@ -1,3 +1,0 @@
-[submodule "ext/humanoid-protocol"]
-	path = ext/humanoid-protocol
-	url = https://github.com/NRobotics/humanoid-protocol.git
