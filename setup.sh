@@ -25,11 +25,9 @@ pip install --upgrade pip
 echo "Installing humanoid-protocol..."
 pip install -e ext/humanoid-protocol/python
 
-# Install system identification with dev dependencies
-echo "Installing system identification tools..."
-cd system_identification
+# Install sim2real with dev dependencies
+echo "Installing sim2real package..."
 pip install -e ".[dev]"
-cd ..
 
 echo
 echo "=== Setup Complete ==="
@@ -38,8 +36,10 @@ echo "To activate the environment:"
 echo "  source .venv/bin/activate"
 echo
 echo "To run system identification:"
-echo "  cd system_identification"
-echo "  python system_identification.py --config config.json"
+echo "  python system_identification/system_identification.py --config system_identification/config.json"
+echo
+echo "Or use the installed command:"
+echo "  sysid --config system_identification/config.json"
 echo
 echo "Don't forget to configure your CAN interface:"
 echo "  sudo ip link set can0 type can bitrate 1000000 fd on"

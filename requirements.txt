@@ -7,6 +7,9 @@ python-can>=4.0.0
 python-can-usbtingo>=1.0.0
 python-can-remote>=0.2.4
 
+# Motor CAN protocol
+humanoid-messages @ git+https://github.com/NRobotics/can-bus-protocol.git@ff66fa8c2230a92bdda79cb3f2a6044d1930d7f0#subdirectory=python
+
 # Serial and Modbus
 pymodbus>=3.11.3
 pyserial>=3.4

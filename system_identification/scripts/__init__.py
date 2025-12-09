@@ -1,6 +1,6 @@
-"""System identification package for robot actuators."""
+"""Scripts for system identification analysis and utilities."""
 
-from .scripts.system_identification import (
+from .system_identification import (
     main,
     ChirpGenerator,
     IKChirpGenerator,

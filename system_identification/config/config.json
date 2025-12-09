@@ -1,0 +1,50 @@
+{
+    "can_interface": {
+        "interface": "socketcan",
+        "channel": "can0",
+        "bitrate": 1000000,
+        "fd": true
+    },
+    "chirp": {
+        "f_start": 0.1,
+        "f_end": 10.0,
+        "duration": 20.0,
+        "sample_rate": 650.0,
+        "sweep_type": "linear"
+    },
+    "control_parameters": {
+        "velocity": 0.0,
+        "effort": 0.0,
+        "stiffness": 5.0,
+        "damping": 2.0
+    },
+    "motor_ids": [0, 1, 2, 3, 4, 5],
+    
+    "_comment_formula": "All joints use: q(t) = scale * direction * (s(t) + bias), where s(t) is base chirp [-1, +1]",
+    
+    "_comment_motors": "Per-motor config for DIRECT control (motors not in ik_groups)",
+    "motors": {
+        "2": {"scale": 0.25, "direction": 1.0, "bias": 0.0},
+        "3": {"scale": 0.25, "direction": -1.0, "bias": 0.0},
+        "4": {"scale": 0.25, "direction": 1.0, "bias": 0.0},
+        "5": {"scale": 0.25, "direction": -1.0, "bias": 0.0}
+    },
+    
+    "_comment_ik_groups": "IK groups: IK inputs treated as 1-DOF joints, then IK converts to motor commands",
+    "ik_groups": [
+        {
+            "name": "foot_0",
+            "ik_type": "foot",
+            "motor_ids": [0, 1],
+            "chirp": {
+                "scale_pitch": 0.25,
+                "direction_pitch": 1.0,
+                "bias_pitch": 0.0,
+                "scale_roll": 0.25,
+                "direction_roll": 1.0,
+                "bias_roll": 0.0
+            }
+        }
+    ]
+}
+

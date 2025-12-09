@@ -34,6 +34,7 @@ dependencies = [
     "pymodbus>=3.11.3",
     "pyserial>=3.4",
     "spd3303x>=1.0.3",
+    "humanoid-messages @ git+https://github.com/NRobotics/can-bus-protocol.git@ff66fa8c2230a92bdda79cb3f2a6044d1930d7f0#subdirectory=python",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +47,8 @@ dev = [
 
 [project.scripts]
 sysid = "system_identification.system_identification:main"
-sysid-analyse = "system_identification.analyse:main"
+sysid-analyse = "system_identification.scripts.analyse:main"
+speed-test = "system_identification.tests.speed_test:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-CAN Speed Test - Profile the send/receive loop for 6 motors
-Tests how fast we can send kinematics to all 6 motors and receive feedback
+CAN Speed Test - Profile the send/receive loop for multiple motors
+Tests how fast we can send kinematics to motors and receive feedback
 
 Supports multiple interfaces:
 - SocketCAN (Linux native CAN interface)
@@ -9,7 +9,7 @@ Supports multiple interfaces:
 - Remote (WebSocket-based remote CAN interface)
 
 Optimizations:
-- Pre-allocated arrays for feedback storage
+- Pre-allocated dictionaries for feedback storage
 - Busy-wait loop instead of event signaling
 - Minimal callback overhead
 - Reduced timeout (2ms instead of 10ms)
@@ -28,7 +28,7 @@ import math
 import statistics
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import builtins
 
@@ -38,10 +38,6 @@ _print = builtins.print
 # Disable prints
 builtins.print = lambda *args, **kwargs: None
 
-# Add the python directory to sys.path
-python_dir = Path(__file__).parent / "ext" / "humanoid-protocol" / "python"
-sys.path.insert(0, str(python_dir))
-
 from humanoid_messages.can import MotorCANController, ControlData, FeedbackData
 
 # Configuration
@@ -49,7 +45,7 @@ CAN_INTERFACE = "socketcan"  # or "pcan" for PCAN
 CAN_CHANNEL = "can0"         # can0 or can1
 CAN_BITRATE = 1000000        # 1 MHz
 DATA_BITRATE = 5000000       # 5 MHz
-NUM_MOTORS = 6
+DEFAULT_MOTOR_IDS = [0, 1, 2, 3, 4, 5]  # Default motor CAN IDs
 
 @dataclass
 class CycleStats:
@@ -63,14 +59,16 @@ class CycleStats:
 class CANSpeedTest:
     """Profile CAN communication speed with multiple motors"""
     
-    def __init__(self, interface: str, channel: str = ""):
+    def __init__(self, interface: str, channel: str = "", motor_ids: List[int] = None):
         self.interface = interface
         self.channel = channel
+        self.motor_ids = motor_ids if motor_ids is not None else DEFAULT_MOTOR_IDS
+        self.num_motors = len(self.motor_ids)
         self.controller: Optional[MotorCANController] = None
         
-        # Feedback tracking - optimized with pre-allocated arrays
+        # Feedback tracking - use dict for arbitrary CAN IDs
         self.feedback_lock = threading.Lock()
-        self.feedback_received = [None] * NUM_MOTORS  # Pre-allocated array
+        self.feedback_received: Dict[int, Optional[FeedbackData]] = {mid: None for mid in self.motor_ids}
         self.feedback_count = 0
         
         # Statistics
@@ -119,13 +117,13 @@ class CANSpeedTest:
             self.controller.start()
             
             # Register feedback callbacks for all motors
-            for motor_id in range(NUM_MOTORS):
+            for motor_id in self.motor_ids:
                 self.controller.set_feedback_callback(
                     motor_id,
                     lambda can_id, data, mid=motor_id: self._on_feedback(mid, data)
                 )
             
-            print("✓ CAN FD initialized successfully\n")
+            print(f"✓ CAN FD initialized successfully for motors: {self.motor_ids}\n")
             return True
             
         except Exception as e:
@@ -146,8 +144,9 @@ class CANSpeedTest:
     def _on_feedback(self, motor_id: int, data: FeedbackData):
         """Callback when feedback is received from a motor - optimized for speed"""
         # Minimize work in callback - just store the data
-        self.feedback_received[motor_id] = data
-        self.feedback_count += 1
+        if motor_id in self.feedback_received:
+            self.feedback_received[motor_id] = data
+            self.feedback_count += 1
     
     def send_kinematics_all(self, test_data: Dict[int, ControlData]) -> float:
         """
@@ -156,7 +155,7 @@ class CANSpeedTest:
         """
         start = time.perf_counter()
         
-        for motor_id in range(NUM_MOTORS):
+        for motor_id in self.motor_ids:
             self.controller.send_kinematics_for_motor(motor_id, test_data[motor_id])
         
         return time.perf_counter() - start
@@ -170,7 +169,7 @@ class CANSpeedTest:
         deadline = start + timeout
         
         # Tight busy-wait loop - much faster than Event.wait()
-        while self.feedback_count < NUM_MOTORS and time.perf_counter() < deadline:
+        while self.feedback_count < self.num_motors and time.perf_counter() < deadline:
             pass  # Busy wait
         
         num_received = self.feedback_count
@@ -187,10 +186,10 @@ class CANSpeedTest:
         """
         cycle_start = time.perf_counter()
         
-        # Clear previous feedback - fast array reset
+        # Clear previous feedback - fast dict reset
         self.feedback_count = 0
-        for i in range(NUM_MOTORS):
-            self.feedback_received[i] = None
+        for motor_id in self.motor_ids:
+            self.feedback_received[motor_id] = None
         
         # Send phase
         send_time = self.send_kinematics_all(test_data)
@@ -216,7 +215,7 @@ class CANSpeedTest:
             target_hz: Target frequency to attempt
         """
         print("="*70)
-        print("CAN Speed Test - 6 Motor Profiling")
+        print(f"CAN Speed Test - {self.num_motors} Motor Profiling")
         print("="*70)
         
         # Print interface info
@@ -233,15 +232,16 @@ class CANSpeedTest:
         else:
             print(f"Interface: {self.interface}")
         
+        print(f"Motor IDs: {self.motor_ids}")
         print(f"Target frequency: {target_hz} Hz ({1000.0/target_hz:.3f} ms period)")
         print(f"Test duration: {duration} seconds")
-        print(f"Number of motors: {NUM_MOTORS}")
+        print(f"Number of motors: {self.num_motors}")
         print("="*70)
         print()
         
         # Create test control data (zero position, moderate stiffness)
         test_data = {}
-        for motor_id in range(NUM_MOTORS):
+        for motor_id in self.motor_ids:
             test_data[motor_id] = ControlData(
                 angle=0.0,
                 velocity=0.0,
@@ -280,7 +280,7 @@ class CANSpeedTest:
                     print(f"[{elapsed:5.1f}s] Cycles: {cycle_count:5d} | "
                           f"Freq: {actual_hz:6.1f} Hz | "
                           f"Avg cycle: {avg_cycle_time:6.3f} ms | "
-                          f"Responses: {stats.responses_received}/{NUM_MOTORS}")
+                          f"Responses: {stats.responses_received}/{self.num_motors}")
                     
                     last_print_time = now
                 
@@ -317,18 +317,19 @@ class CANSpeedTest:
         # Calculate statistics
         total_cycles = len(self.cycle_stats)
         total_responses = sum(s.responses_received for s in self.cycle_stats)
-        expected_responses = total_cycles * NUM_MOTORS
+        expected_responses = total_cycles * self.num_motors
         response_rate = (total_responses / expected_responses) * 100 if expected_responses > 0 else 0
         
         print(f"\nCycle Statistics:")
+        print(f"  Motor IDs: {self.motor_ids}")
         print(f"  Total cycles completed: {total_cycles}")
         print(f"  Expected responses: {expected_responses}")
         print(f"  Received responses: {total_responses} ({response_rate:.2f}%)")
         
         # Cycles with complete responses
-        complete_cycles = sum(1 for s in self.cycle_stats if s.responses_received == NUM_MOTORS)
+        complete_cycles = sum(1 for s in self.cycle_stats if s.responses_received == self.num_motors)
         complete_rate = (complete_cycles / total_cycles) * 100
-        print(f"  Complete cycles (6/6): {complete_cycles} ({complete_rate:.2f}%)")
+        print(f"  Complete cycles ({self.num_motors}/{self.num_motors}): {complete_cycles} ({complete_rate:.2f}%)")
         
         print(f"\nTiming Analysis:")
         print(f"  Total Cycle Time:")
@@ -339,11 +340,11 @@ class CANSpeedTest:
         if len(total_times) > 1:
             print(f"    StdDev: {statistics.stdev(total_times):7.3f} ms")
         
-        print(f"\n  Send Phase (6 messages):")
+        print(f"\n  Send Phase ({self.num_motors} messages):")
         print(f"    Mean:   {statistics.mean(send_times):7.3f} ms")
         print(f"    Max:    {max(send_times):7.3f} ms")
         
-        print(f"\n  Receive Phase (wait for 6 responses):")
+        print(f"\n  Receive Phase (wait for {self.num_motors} responses):")
         print(f"    Mean:   {statistics.mean(receive_times):7.3f} ms")
         print(f"    Max:    {max(receive_times):7.3f} ms")
         
@@ -369,7 +370,7 @@ class CANSpeedTest:
         # Bus utilization estimate
         control_size = ControlData.packed_size()
         feedback_size = FeedbackData.packed_size()
-        bytes_per_cycle = (control_size + feedback_size) * NUM_MOTORS
+        bytes_per_cycle = (control_size + feedback_size) * self.num_motors
         bits_per_cycle = bytes_per_cycle * 8
         
         # Account for CAN FD overhead (roughly 30% for frame structure, CRC, etc.)
@@ -390,7 +391,7 @@ class CANSpeedTest:
         # Summary recommendation
         print("\nSummary:")
         if complete_rate >= 95 and max_theoretical_hz >= 1000:
-            print("  ✓ System can reliably achieve 1 kHz with all 6 motors")
+            print(f"  ✓ System can reliably achieve 1 kHz with all {self.num_motors} motors")
         elif max_theoretical_hz >= 500:
             print(f"  ⚠ System can achieve ~{int(max_theoretical_hz)} Hz")
             print("    Consider optimizing for 1 kHz target")
@@ -409,29 +410,50 @@ class CANSpeedTest:
                 print(f"Error stopping controller: {e}")
 
 
+def parse_motor_ids(value: str) -> List[int]:
+    """Parse motor IDs from string (supports comma-separated and ranges)
+    
+    Examples:
+        "0,1,2" -> [0, 1, 2]
+        "0-5" -> [0, 1, 2, 3, 4, 5]
+        "0,1,4-6" -> [0, 1, 4, 5, 6]
+    """
+    motor_ids = []
+    for part in value.replace(" ", "").split(","):
+        if "-" in part:
+            start, end = part.split("-")
+            motor_ids.extend(range(int(start), int(end) + 1))
+        else:
+            motor_ids.append(int(part))
+    return motor_ids
+
+
 def main():
     """Main entry point"""
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='CAN Speed Test for 6 motors',
+        description='CAN Speed Test for multiple motors',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # SocketCAN on can0
+  # SocketCAN on can0 with default motors (0-5)
   python3 speed_test.py --interface socketcan --channel can0
   
-  # USBTingo interface
-  python3 speed_test.py --interface usbtingo
+  # Test specific motors by CAN ID
+  python3 speed_test.py --motors 0,1,4,7
+  
+  # Test motor range
+  python3 speed_test.py --motors 0-5
+  
+  # USBTingo interface with specific motors
+  python3 speed_test.py --interface usbtingo --motors 2,3,8,9
   
   # Remote interface via WebSocket (URI as interface)
-  python3 speed_test.py --interface ws://192.168.1.100:8080
-  
-  # Or with explicit channel for socketcan
-  python3 speed_test.py --channel can1
+  python3 speed_test.py --interface ws://192.168.1.100:8080 --motors 0-3
   
   # Pin to CPU core 2 for better real-time performance
-  python3 speed_test.py --channel can0 --cpu-affinity 2
+  python3 speed_test.py --channel can0 --cpu-affinity 2 --motors 0-5
         """
     )
     
@@ -439,6 +461,8 @@ Examples:
                        help='CAN interface: socketcan, usbtingo, pcan, or ws://... for WebSocket (default: socketcan)')
     parser.add_argument('--channel', default='can0',
                        help='CAN channel for socketcan/pcan (default: can0, not used for usbtingo/websocket)')
+    parser.add_argument('--motors', '-m', type=str, default=None,
+                       help='Motor CAN IDs to test (e.g., "0,1,2" or "0-5" or "0,1,4-6"). Default: 0-5')
     parser.add_argument('--duration', type=float, default=10.0,
                        help='Test duration in seconds (default: 10)')
     parser.add_argument('--target-hz', type=float, default=1000.0,
@@ -457,12 +481,15 @@ Examples:
         except Exception as e:
             print(f"Warning: Could not set CPU affinity: {e}")
     
+    # Parse motor IDs
+    motor_ids = parse_motor_ids(args.motors) if args.motors else DEFAULT_MOTOR_IDS
+    
     # Determine if channel should be used
     is_websocket = args.interface.startswith("ws://") or args.interface.startswith("wss://")
     channel = "" if (args.interface == "usbtingo" or is_websocket) else args.channel
     
     # Create and run test
-    test = CANSpeedTest(args.interface, channel=channel)
+    test = CANSpeedTest(args.interface, channel=channel, motor_ids=motor_ids)
     
     if not test.setup():
         sys.exit(1)

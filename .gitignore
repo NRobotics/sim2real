@@ -57,6 +57,9 @@ results/
 *.pdf
 *.csv
 
+# System identification data
+system_identification/data/
+
 # Build artifacts in subdirectories
 **/*.egg-info/
 **/.mypy_cache/
