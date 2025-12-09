@@ -29,6 +29,13 @@ from pathlib import Path
 
 import numpy as np
 
+
+def busy_sleep(duration: float) -> None:
+    """Accurate sleep using busy-wait. Best for short durations (<50ms)."""
+    end_time = time.perf_counter() + duration
+    while time.perf_counter() < end_time:
+        pass
+
 from humanoid_messages.can import (
     ConfigurationData,
     ControlData,
@@ -40,6 +47,11 @@ from humanoid_messages.can import (
 try:
     from ..kinematics import ik_foot_to_motor, fk_motor_to_foot
 except ImportError:
+    # Handle running directly (python scripts/system_identification.py)
+    # Add parent directory to path so we can import kinematics
+    _parent_dir = Path(__file__).resolve().parent.parent
+    if str(_parent_dir) not in sys.path:
+        sys.path.insert(0, str(_parent_dir))
     from kinematics import ik_foot_to_motor, fk_motor_to_foot
 
 
@@ -733,7 +745,7 @@ class SystemIdentification:
         print(f"Motors started: {self.motor_ids}")
         time.sleep(1.0)
 
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
         self.sample_count = 0
         is_complete = False
 
@@ -742,16 +754,21 @@ class SystemIdentification:
         missed_deadlines = 0
 
         # Rate limiting setup
+        # Use perf_counter for accurate timing (nanosecond resolution)
         if rate_limited:
             target_period = 1.0 / expected_rate
             feedback_timeout = target_period * 2  # Allow 2x target period for feedback
         else:
             target_period = 0.0
             feedback_timeout = 0.01  # 10ms default timeout when not rate limiting
-        last_send_time = time.time()
+        
+        # Use busy-wait for accurate timing in dry-run mode (no I/O overhead)
+        use_busy_wait = self.dry_run and rate_limited
+        last_send_time = None  # Will be set after first iteration
+        first_sample_done = False
 
         while not is_complete:
-            loop_start = time.time()
+            loop_start = time.perf_counter()
 
             # Generate control data for all motors
             control_data = {}
@@ -827,25 +844,38 @@ class SystemIdentification:
                 # to avoid blocking forever
                 pass
 
-            self.sample_count += 1
+            # Only count valid samples (not the completion iteration)
+            if not is_complete:
+                self.sample_count += 1
 
             # Calculate loop timing (after feedback received)
-            loop_time = time.time() - loop_start
+            loop_time = time.perf_counter() - loop_start
             loop_times.append(loop_time)
 
             # Rate limiting: maintain minimum period between sends
             # Don't try to "catch up" - CAN requires waiting for response
-            if rate_limited:
-                elapsed_since_last = time.time() - last_send_time
+            if rate_limited and last_send_time is not None:
+                elapsed_since_last = time.perf_counter() - last_send_time
                 sleep_time = target_period - elapsed_since_last
                 
                 if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
+                    if use_busy_wait:
+                        # Busy-wait for accurate timing (dry-run mode)
+                        busy_sleep(sleep_time)
+                    else:
+                        # Regular sleep for real hardware (saves CPU)
+                        time.sleep(sleep_time)
+                elif not is_complete:
                     # We're running slower than requested rate
+                    # (don't count the final completion iteration)
                     missed_deadlines += 1
             
-            last_send_time = time.time()
+            last_send_time = time.perf_counter()
+            
+            # Start timing from first sample completion (not before loop)
+            if not first_sample_done:
+                self.start_time = time.perf_counter()
+                first_sample_done = True
 
             # Check if requested rate is achievable (after first 10 samples)
             if rate_limited and self.sample_count == 10 and not rate_warning_issued:
@@ -871,21 +901,24 @@ class SystemIdentification:
                 else:
                     progress = 0.0
                     
-                avg_loop_time = np.mean(loop_times[-100:])
-                actual_rate = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
+                # Calculate actual achieved rate from elapsed time
+                # Use (samples-1)/elapsed for interval-based rate (N samples = N-1 intervals)
+                elapsed_so_far = time.perf_counter() - self.start_time
+                intervals = self.sample_count - 1
+                current_rate = intervals / elapsed_so_far if elapsed_so_far > 0 and intervals > 0 else expected_rate
                 
                 # Build progress message
-                msg = f"Progress: {progress:.1f}% | Sample: {self.sample_count} | Rate: {actual_rate:.1f} Hz"
-                
-                # Add IK group info
-                for group_name, ik_inputs in self.commanded_ik_inputs.items():
-                    for name, value in ik_inputs.items():
-                        msg += f" | {group_name}.{name}: {np.degrees(value):.2f}°"
+                if rate_limited:
+                    msg = f"Progress: {progress:.1f}% | Sample: {self.sample_count} | Rate: {current_rate:.1f}/{expected_rate:.0f} Hz"
+                else:
+                    msg = f"Progress: {progress:.1f}% | Sample: {self.sample_count} | Rate: {current_rate:.1f} Hz"
                 
                 print(msg)
 
-        elapsed = time.time() - self.start_time
-        actual_rate = self.sample_count / elapsed if elapsed > 0 else 0
+        elapsed = time.perf_counter() - self.start_time
+        # Use interval-based rate: (samples-1)/elapsed for N samples = N-1 intervals
+        intervals = self.sample_count - 1
+        actual_rate = intervals / elapsed if elapsed > 0 and intervals > 0 else 0
         avg_loop_time_ms = np.mean(loop_times) * 1000
 
         print("\nIdentification complete!")
@@ -901,13 +934,13 @@ class SystemIdentification:
         else:
             print("Rate limiting: DISABLED")
         print(f"Actual rate: {actual_rate:.1f} Hz")
-        print(f"Average loop time: {avg_loop_time_ms:.2f} ms (CAN round-trip)")
+        loop_label = "mock loop" if self.dry_run else "CAN round-trip"
+        print(f"Average loop time: {avg_loop_time_ms:.2f} ms ({loop_label})")
         
         if rate_limited and missed_deadlines > 0:
             missed_pct = (missed_deadlines / self.sample_count) * 100
             print(f"⚠️  Missed deadlines: {missed_deadlines}/{self.sample_count} ({missed_pct:.1f}%)")
-            print(f"    Requested rate was higher than CAN bus can sustain.")
-            print(f"    Consider reducing sample_rate to {actual_rate:.0f} Hz or lower.")
+
 
     def save_results(self, output_file: str) -> None:
         """Save collected feedback data as JSON"""
@@ -1063,10 +1096,60 @@ class SystemIdentification:
             "joint_ids": self.motor_ids,  # Motor CAN IDs as joint order
         }
         
+        # Add metadata about IK groups so user knows which joint does what
+        if self.motor_to_ik_group:
+            # joint_info[i] describes column i in dof_pos/des_dof_pos
+            joint_info = []
+            for can_id in self.motor_ids:
+                if can_id in self.motor_to_ik_group:
+                    group_name, idx = self.motor_to_ik_group[can_id]
+                    ik_gen = self.ik_generators[group_name]
+                    # idx 0 = first motor (e.g., lower), idx 1 = second motor (e.g., upper)
+                    role = "lower" if idx == 0 else "upper"
+                    joint_info.append({
+                        "motor_id": can_id,
+                        "type": "ik",
+                        "ik_group": group_name,
+                        "ik_type": ik_gen.ik_type,
+                        "ik_index": idx,  # 0=lower, 1=upper for foot
+                        "role": role,
+                        "ik_inputs": ik_gen.input_names,  # e.g., ["pitch", "roll"]
+                    })
+                else:
+                    joint_info.append({
+                        "motor_id": can_id,
+                        "type": "direct",
+                    })
+            data["joint_info"] = joint_info
+            
+            # Also add IK group summary
+            ik_groups_info = {}
+            for group_name, ik_gen in self.ik_generators.items():
+                group_motor_ids = []
+                for mid, (gname, idx) in self.motor_to_ik_group.items():
+                    if gname == group_name:
+                        group_motor_ids.append((idx, mid))
+                group_motor_ids.sort()
+                motor_ids_ordered = [mid for _, mid in group_motor_ids]
+                
+                # Find column indices in dof_pos for this group's motors
+                col_indices = [self.motor_ids.index(mid) for mid in motor_ids_ordered]
+                
+                ik_groups_info[group_name] = {
+                    "ik_type": ik_gen.ik_type,
+                    "input_names": ik_gen.input_names,
+                    "motor_ids": motor_ids_ordered,
+                    "column_indices": col_indices,  # Which columns in dof_pos
+                }
+            data["ik_groups"] = ik_groups_info
+        
         torch.save(data, output_file)
         print(f"Torch data saved to: {output_file}")
         print(f"  Shape: time={tuple(time_data.shape)}, dof_pos={tuple(dof_pos.shape)}, des_dof_pos={tuple(des_dof_pos.shape)}")
         print(f"  Joint IDs (column order): {self.motor_ids}")
+        if self.motor_to_ik_group:
+            for group_name, info in data.get("ik_groups", {}).items():
+                print(f"  IK group '{group_name}': columns {info['column_indices']} = motors {info['motor_ids']} ({info['ik_type']})")
 
     def save_plots(self, output_dir: str) -> None:
         """Save plots for each motor and IK group"""
@@ -1199,6 +1282,36 @@ def parse_motor_ids(value: str) -> list[int]:
     return motor_ids
 
 
+def resolve_config_path(config_arg: str) -> Path:
+    """Resolve config file path, looking in package config/ folder if not found.
+    
+    Search order:
+    1. Exact path as given (absolute or relative to cwd)
+    2. In config/ folder relative to package root (system_identification/config/)
+    3. In config/ folder relative to script location
+    """
+    config_path = Path(config_arg)
+    
+    # 1. Check exact path
+    if config_path.exists():
+        return config_path
+    
+    # 2. Check in package config/ folder (system_identification/config/)
+    package_root = Path(__file__).resolve().parent.parent
+    package_config = package_root / "config" / config_path.name
+    if package_config.exists():
+        return package_config
+    
+    # 3. If config_arg doesn't include "config/", try prepending it
+    if not config_arg.startswith("config/") and not config_arg.startswith("config\\"):
+        package_config_full = package_root / "config" / config_arg
+        if package_config_full.exists():
+            return package_config_full
+    
+    # Return original path (will fail with file not found)
+    return config_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="System identification for robot actuators",
@@ -1304,18 +1417,22 @@ To add new IK types, use IKRegistry.register() in your code.
             print(f"  {name}: inputs={info['input_names']}, motors={info['motor_count']}")
         return
 
-    if not Path(args.config).exists():
+    # Resolve config path (looks in package config/ folder if not found)
+    config_path = resolve_config_path(args.config)
+    if not config_path.exists():
         print(f"Error: Config file not found: {args.config}")
+        print(f"  Searched: {args.config}")
+        print(f"  Also tried: {Path(__file__).resolve().parent.parent / 'config' / Path(args.config).name}")
         sys.exit(1)
 
     if args.list_motors:
-        with Path(args.config).open() as f:
+        with config_path.open() as f:
             config = json.load(f)
         motor_ids = config.get("motor_ids", list(config.get("motors", {}).keys()))
         print(f"Motor IDs in config: {motor_ids}")
         return
 
-    sysid = SystemIdentification(args.config, motor_ids=args.motors, dry_run=args.dry_run)
+    sysid = SystemIdentification(str(config_path), motor_ids=args.motors, dry_run=args.dry_run)
 
     try:
         sysid.setup()
@@ -1323,7 +1440,13 @@ To add new IK types, use IKRegistry.register() in your code.
         
         # Generate timestamp for all output files
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Resolve output path (relative to package if not absolute)
         output_path = Path(args.output)
+        if not output_path.is_absolute():
+            # Make relative paths relative to package root
+            package_root = Path(__file__).resolve().parent.parent
+            output_path = package_root / output_path
         output_dir = output_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
         
