@@ -1,0 +1,48 @@
+{
+    "can_interface": {
+        "interface": "socketcan",
+        "channel": "can0",
+        "bitrate": 1000000,
+        "fd": true
+    },
+    "chirp": {
+        "f_start": 0.001,
+        "f_end": 5.0,
+        "duration": 60.0,
+        "amplitude": 1.0,
+        "sample_rate": 650.0,
+        "sweep_type": "linear"
+    },
+    "control_parameters": {
+        "velocity": 0.0,
+        "effort": 0.0,
+        "stiffness": 5.0,
+        "damping": 2.0
+    },
+    "motors": {
+        "0": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        },
+        "1": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        },
+        "2": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        },
+        "3": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        },
+        "4": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        },
+        "5": {
+            "amplitude_scale": 1.0,
+            "offset": 0.0
+        }
+    }
+}
