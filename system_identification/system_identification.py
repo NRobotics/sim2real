@@ -32,6 +32,67 @@ from humanoid_messages.can import (  # noqa: E402
 )
 
 
+class MockMotorCANController:
+    """Mock controller for dry-run mode (no hardware required)"""
+
+    def __init__(self, **kwargs):
+        self._config_callbacks: dict = {}
+        self._feedback_callbacks: dict = {}
+        print("[DRY-RUN] Mock CAN controller initialized")
+
+    def start(self):
+        print("[DRY-RUN] Mock CAN controller started")
+
+    def stop(self):
+        print("[DRY-RUN] Mock CAN controller stopped")
+
+    def set_config_callback(self, can_id: int, callback):
+        self._config_callbacks[can_id] = callback
+
+    def set_feedback_callback(self, can_id: int, callback):
+        self._feedback_callbacks[can_id] = callback
+
+    def get_motor_configuration(self, can_id: int):
+        """Simulate receiving motor configuration"""
+        if can_id in self._config_callbacks:
+            # Create mock configuration with correct fields
+            mock_config = ConfigurationData(
+                qaxis_current_P=10.0,
+                qaxis_current_I=0.1,
+                qaxis_current_D=0.01,
+                qaxis_current_limit=10.0,
+                qaxis_lpf=1000.0,
+                daxis_current_P=10.0,
+                daxis_current_I=0.1,
+                daxis_current_D=0.01,
+                daxis_current_limit=10.0,
+                daxis_lpf=1000.0,
+                bypass_control_loop=False,
+            )
+            self._config_callbacks[can_id](can_id, mock_config)
+
+    def start_motor(self, can_id: int):
+        print(f"[DRY-RUN] Motor {can_id} started")
+
+    def stop_all_motors(self):
+        print("[DRY-RUN] All motors stopped")
+
+    def send_kinematics_for_motor(self, can_id: int, control_data: ControlData):
+        """Simulate receiving feedback after sending control"""
+        if can_id in self._feedback_callbacks:
+            # Simulate feedback with some noise
+            mock_feedback = FeedbackData(
+                angle=control_data.angle + np.random.normal(0, 0.01),
+                velocity=control_data.velocity + np.random.normal(0, 0.1),
+                effort=control_data.effort + np.random.normal(0, 0.05),
+                voltage=24.0 + np.random.normal(0, 0.1),
+                temp_motor=35.0 + np.random.normal(0, 1.0),
+                temp_pcb=30.0 + np.random.normal(0, 0.5),
+                flags=0,
+            )
+            self._feedback_callbacks[can_id](can_id, mock_feedback)
+
+
 class ChirpGenerator:
     """Generate chirp (frequency sweep) signals for system identification"""
 
@@ -108,9 +169,15 @@ class ChirpGenerator:
 
 
 class SystemIdentification:
-    def __init__(self, config_file: str):
+    def __init__(self, config_file: str, dry_run: bool = False):
         self.config = self._load_config(config_file)
-        self.controller = MotorCANController(**self.config["can_interface"])
+        self.dry_run = dry_run
+
+        if dry_run:
+            print("[DRY-RUN] Running without hardware - using mock controller")
+            self.controller = MockMotorCANController(**self.config["can_interface"])
+        else:
+            self.controller = MotorCANController(**self.config["can_interface"])
 
         # Storage for motor configurations
         self.motor_configs: dict[int, ConfigurationData] = {}
@@ -349,6 +416,11 @@ def main() -> None:
         default="sysid_results.json",
         help="Output file for results (JSON)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run without hardware (simulated motors for testing)",
+    )
 
     args = parser.parse_args()
 
@@ -358,7 +430,7 @@ def main() -> None:
         create_example_config(args.config)
         return
 
-    sysid = SystemIdentification(args.config)
+    sysid = SystemIdentification(args.config, dry_run=args.dry_run)
 
     try:
         sysid.setup()
