@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "system-identification"
+name = "sim2real"
 version = "0.1.0"
 description = "System identification for robot actuators using chirp signals"
 readme = "README.md"
@@ -45,11 +45,12 @@ dev = [
 ]
 
 [project.scripts]
-sysid = "system_identification:main"
-sysid-analyse = "analyse:main"
+sysid = "system_identification.system_identification:main"
+sysid-analyse = "system_identification.analyse:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["system_identification*"]
 
 # Ruff configuration - fast Python linter and formatter
 [tool.ruff]
@@ -117,7 +118,7 @@ ignore_errors = true
 
 # Pytest configuration
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["system_identification/tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"

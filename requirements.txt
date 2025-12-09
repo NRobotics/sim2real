@@ -19,3 +19,4 @@ typing-extensions>=4.0.0
 
 # Development dependencies (install with: pip install -r requirements-dev.txt)
 # or use: pip install -e ".[dev]"
+
