@@ -3,47 +3,51 @@
 
 set -e
 
-echo "=== Sim2Real Project Setup ==="
-echo
 
-# Check Python version
-python3 --version || { echo "Python 3 is required"; exit 1; }
+main() {
+    echo "=== Sim2Real Project Setup ==="
+    echo
 
-# Initialize submodules
-echo "Initializing git submodules..."
-git submodule update --init --recursive
+    # Check Python version
+    python3 --version || { echo "Python 3 is required"; return 1; }
 
-# Create virtual environment
-echo "Creating virtual environment..."
-python3 -m venv .venv
-source .venv/bin/activate
+    # Initialize submodules
+    echo "Initializing git submodules..."
+    git submodule update --init --recursive
 
-# Upgrade pip
-pip install --upgrade pip
+    # Create virtual environment
+    echo "Creating virtual environment..."
+    if [ ! -d ".venv" ]; then
+        python3 -m venv .venv
+    fi
+    source .venv/bin/activate
 
-# Install sim2real with dev dependencies
-echo "Installing sim2real package..."
-# Install humanoid-protocol
-echo "Installing humanoid-protocol..."
-pip install -e humanoid-protocol/python
+    # Upgrade pip
+    pip install --upgrade pip
 
-# Install sim2real with dev dependencies
-echo "Installing sim2real package..."
-pip install -e ".[dev]"
+    # Install humanoid-protocol
+    echo "Installing humanoid-protocol..."
+    pip install -e humanoid-protocol/python
 
-echo
-echo "=== Setup Complete ==="
-echo
-echo "To activate the environment:"
-echo "  source .venv/bin/activate"
-echo
-echo "To run system identification:"
-echo "  python system_identification/system_identification.py --config system_identification/config.json"
-echo
-echo "Or use the installed command:"
-echo "  sysid --config system_identification/config.json"
-echo
-echo "Don't forget to configure your CAN interface:"
-echo "  sudo ip link set can0 type can bitrate 1000000 fd on"
-echo "  sudo ip link set can0 up"
+    # Install sim2real with dev dependencies
+    echo "Installing sim2real package..."
+    pip install -e ".[dev]"
 
+    echo
+    echo "=== Setup Complete ==="
+    echo
+    echo "Environment is active."
+}
+
+# Check if the script is being sourced or executed
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    # Script is being sourced
+    main "$@"
+else
+    # Script is being executed
+    main "$@"
+    echo
+    echo "NOTE: To keep the environment active, run this script with 'source':"
+    echo "  source setup.sh"
+    echo
+fi
