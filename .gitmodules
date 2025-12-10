@@ -1,0 +1,4 @@
+[submodule "humanoid-protocol"]
+	path = humanoid-protocol
+	url = https://github.com/NRobotics/humanoid-protocol
+	branch = feature/N-598-add_imu_data
