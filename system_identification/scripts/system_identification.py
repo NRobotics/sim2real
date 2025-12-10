@@ -17,7 +17,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -35,6 +37,51 @@ def busy_sleep(duration: float) -> None:
     end_time = time.perf_counter() + duration
     while time.perf_counter() < end_time:
         pass
+
+
+class StdoutSuppressor:
+    """
+    Global stdout suppressor that works across threads.
+    
+    The CAN library prints from its receive thread, so we need a global
+    filter rather than a thread-local context manager.
+    """
+    _original_stdout = None
+    _devnull = None
+    _enabled = False
+    
+    @classmethod
+    def enable(cls):
+        """Redirect stdout to devnull globally."""
+        if not cls._enabled:
+            cls._original_stdout = sys.stdout
+            cls._devnull = open(os.devnull, 'w')
+            sys.stdout = cls._devnull
+            cls._enabled = True
+    
+    @classmethod
+    def disable(cls):
+        """Restore stdout globally."""
+        if cls._enabled:
+            sys.stdout = cls._original_stdout
+            if cls._devnull:
+                cls._devnull.close()
+            cls._enabled = False
+    
+    @classmethod
+    @contextlib.contextmanager
+    def suppressed(cls):
+        """Context manager for temporary suppression."""
+        cls.enable()
+        try:
+            yield
+        finally:
+            cls.disable()
+
+
+# Convenience alias
+suppress_stdout = StdoutSuppressor.suppressed
+
 
 from humanoid_messages.can import (
     ConfigurationData,
@@ -543,23 +590,25 @@ class SystemIdentification:
     def setup(self) -> None:
         """Initialize CAN controller and read motor configurations"""
         print(f"Starting CAN controller for motors: {self.motor_ids}")
-        self.controller.start()
-        time.sleep(0.1)
+        with suppress_stdout():
+            self.controller.start()
+            time.sleep(0.1)
 
-        # Register callbacks for each motor
-        for can_id in self.motor_ids:
-            self.controller.set_config_callback(can_id, self._config_callback)
-            self.controller.set_feedback_callback(can_id, self._feedback_callback)
+            # Register callbacks for each motor
+            for can_id in self.motor_ids:
+                self.controller.set_config_callback(can_id, self._config_callback)
+                self.controller.set_feedback_callback(can_id, self._feedback_callback)
 
         # Request configurations from all motors
         print(f"Requesting configurations from motors: {self.motor_ids}")
-        for can_id in self.motor_ids:
-            self.controller.get_motor_configuration(can_id)
+        with suppress_stdout():
+            for can_id in self.motor_ids:
+                self.controller.get_motor_configuration(can_id)
 
-        # Wait for all configurations
-        if not self.config_received.wait(timeout=2.0):
-            missing = self.configs_to_receive
-            print(f"Warning: Did not receive configs from motors: {missing}")
+            # Wait for all configurations
+            if not self.config_received.wait(timeout=2.0):
+                missing = self.configs_to_receive
+                print(f"Warning: Did not receive configs from motors: {missing}")
 
         print(f"Received configurations from {len(self.motor_configs)} motors")
 
@@ -738,9 +787,10 @@ class SystemIdentification:
         if self.direct_motors:
             print(f"Direct motors: {sorted(self.direct_motors)}")
 
-        for can_id in self.motor_ids:
-            self.controller.start_motor(can_id)
-            time.sleep(0.125)
+        with suppress_stdout():
+            for can_id in self.motor_ids:
+                self.controller.start_motor(can_id)
+                time.sleep(0.125)
 
         print(f"Motors started: {self.motor_ids}")
         time.sleep(1.0)
@@ -766,6 +816,9 @@ class SystemIdentification:
         use_busy_wait = self.dry_run and rate_limited
         last_send_time = None  # Will be set after first iteration
         first_sample_done = False
+
+        # Enable global stdout suppression to silence CAN library's receive thread
+        StdoutSuppressor.enable()
 
         while not is_complete:
             loop_start = time.perf_counter()
@@ -863,8 +916,20 @@ class SystemIdentification:
                         # Busy-wait for accurate timing (dry-run mode)
                         busy_sleep(sleep_time)
                     else:
-                        # Regular sleep for real hardware (saves CPU)
-                        time.sleep(sleep_time)
+                        # For real hardware: time.sleep() is inaccurate for short durations
+                        # (often oversleeps by 1-2ms on Linux). Use hybrid approach:
+                        # - Regular sleep for longer durations (saves CPU)
+                        # - Busy-wait for short durations (accurate timing)
+                        if sleep_time > 0.002:  # > 2ms: use regular sleep
+                            # Sleep for most of the time, leave 1ms for busy-wait
+                            time.sleep(sleep_time - 0.001)
+                            # Finish with busy-wait for accuracy
+                            remaining = target_period - (time.perf_counter() - last_send_time)
+                            if remaining > 0:
+                                busy_sleep(remaining)
+                        else:
+                            # Short duration: busy-wait for accuracy
+                            busy_sleep(sleep_time)
                 elif not is_complete:
                     # We're running slower than requested rate
                     # (don't count the final completion iteration)
@@ -883,10 +948,12 @@ class SystemIdentification:
                 max_achievable_rate = 1.0 / avg_loop_time if avg_loop_time > 0 else float('inf')
                 
                 if max_achievable_rate < expected_rate * 0.9:  # 10% margin
+                    StdoutSuppressor.disable()
                     print(f"\n⚠️  WARNING: Requested rate {expected_rate} Hz is too high!")
                     print(f"    CAN round-trip time: ~{avg_loop_time*1000:.1f} ms")
                     print(f"    Max achievable rate: ~{max_achievable_rate:.1f} Hz")
                     print(f"    Running at maximum achievable rate instead.\n")
+                    StdoutSuppressor.enable()
                     rate_warning_issued = True
 
             # Print progress
@@ -913,7 +980,13 @@ class SystemIdentification:
                 else:
                     msg = f"Progress: {progress:.1f}% | Sample: {self.sample_count} | Rate: {current_rate:.1f} Hz"
                 
+                # Temporarily disable suppression to print our progress
+                StdoutSuppressor.disable()
                 print(msg)
+                StdoutSuppressor.enable()
+
+        # Disable stdout suppression after loop completes
+        StdoutSuppressor.disable()
 
         elapsed = time.perf_counter() - self.start_time
         # Use interval-based rate: (samples-1)/elapsed for N samples = N-1 intervals
@@ -1260,13 +1333,14 @@ class SystemIdentification:
     def cleanup(self) -> None:
         """Stop all motors and close CAN controller"""
         print("\nStopping motors...")
-        try:
-            self.controller.stop_all_motors()
-            time.sleep(0.1)
-        except Exception as e:
-            print(f"Error stopping motors: {e}")
+        with suppress_stdout():
+            try:
+                self.controller.stop_all_motors()
+                time.sleep(0.1)
+            except Exception as e:
+                print(f"Error stopping motors: {e}")
 
-        self.controller.stop()
+            self.controller.stop()
 
 
 def parse_motor_ids(value: str) -> list[int]:
@@ -1368,8 +1442,8 @@ To add new IK types, use IKRegistry.register() in your code.
         "--output",
         "-o",
         type=str,
-        default="data/sysid_results.json",
-        help="Output file for results (JSON). Timestamp will be appended to filename.",
+        default="data",
+        help="Output directory for results. A timestamped subfolder will be created.",
     )
     parser.add_argument(
         "--dry-run",
@@ -1386,8 +1460,8 @@ To add new IK types, use IKRegistry.register() in your code.
         "--save",
         "-s",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Save results to JSON file (default: True). Use --no-save to disable.",
+        default=False,
+        help="Save results to JSON file (default: False). Use --save to enable.",
     )
     parser.add_argument(
         "--save-plots",
@@ -1438,33 +1512,36 @@ To add new IK types, use IKRegistry.register() in your code.
         sysid.setup()
         sysid.run_identification()
         
-        # Generate timestamp for all output files
+        # Generate timestamp for output folder
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Resolve output path (relative to package if not absolute)
-        output_path = Path(args.output)
-        if not output_path.is_absolute():
+        # Resolve output base path (relative to package if not absolute)
+        output_base = Path(args.output)
+        if not output_base.is_absolute():
             # Make relative paths relative to package root
             package_root = Path(__file__).resolve().parent.parent
-            output_path = package_root / output_path
-        output_dir = output_path.parent
+            output_base = package_root / output_base
+        
+        # Create timestamped output folder
+        output_dir = output_base / f"sysid_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nOutput folder: {output_dir}")
         
         # Save JSON results
         if args.save:
-            output_file = output_dir / f"{output_path.stem}_{timestamp}{output_path.suffix}"
+            output_file = output_dir / "results.json"
             sysid.save_results(str(output_file))
         else:
-            print("\nJSON results not saved (--no-save specified)")
+            print("JSON results not saved (--no-save specified)")
         
         # Save PyTorch format
         if args.save_torch:
-            torch_file = output_dir / f"{output_path.stem}_{timestamp}.pt"
+            torch_file = output_dir / "results.pt"
             sysid.save_torch(str(torch_file))
         
         # Save plots
         if args.save_plots:
-            plots_dir = output_dir / f"plots_{timestamp}"
+            plots_dir = output_dir / "plots"
             sysid.save_plots(str(plots_dir))
             
     except KeyboardInterrupt:

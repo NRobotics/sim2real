@@ -21,10 +21,6 @@ source .venv/bin/activate
 # Upgrade pip
 pip install --upgrade pip
 
-# Install humanoid-protocol
-echo "Installing humanoid-protocol..."
-pip install -e ext/humanoid-protocol/python
-
 # Install sim2real with dev dependencies
 echo "Installing sim2real package..."
 pip install -e ".[dev]"

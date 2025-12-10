@@ -7,10 +7,11 @@
     },
     "chirp": {
         "f_start": 0.1,
-        "f_end": 10.0,
+        "f_end": 0.5,
         "duration": 20.0,
         "sample_rate": 500.0,
-        "sweep_type": "linear"
+        "sweep_type": "linear",
+        "rate_limit": true
     },
     "control_parameters": {
         "velocity": 0.0,
@@ -18,24 +19,49 @@
         "stiffness": 5.0,
         "damping": 2.0
     },
-    "motor_ids": [0, 1, 2, 3, 4, 5],
-    
+    "motor_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+    ],
     "_comment_formula": "All joints use: q(t) = scale * direction * (s(t) + bias), where s(t) is base chirp [-1, +1]",
-    
     "_comment_motors": "Per-motor config for DIRECT control (motors not in ik_groups)",
+    "_comment_motor_limits": "Direct motors: scale defines amplitude in radians. Typical safe range: 0.1-0.5 rad. Check motor joint limits before exceeding.",
     "motors": {
-        "2": {"scale": 0.25, "direction": 1.0, "bias": 0.0},
-        "3": {"scale": 0.25, "direction": -1.0, "bias": 0.0},
-        "4": {"scale": 0.25, "direction": 1.0, "bias": 0.0},
-        "5": {"scale": 0.25, "direction": -1.0, "bias": 0.0}
+        "2": {
+            "scale": 2.0,
+            "direction": 1.0,
+            "bias": 0.0
+        },
+        "3": {
+            "scale": 2.0,
+            "direction": -1.0,
+            "bias": 0.0
+        },
+        "4": {
+            "scale": 2.0,
+            "direction": 1.0,
+            "bias": 0.0
+        },
+        "5": {
+            "scale": 2.0,
+            "direction": -1.0,
+            "bias": 0.0
+        }
     },
-    
     "_comment_ik_groups": "IK groups: IK inputs treated as 1-DOF joints, then IK converts to motor commands",
+    "_comment_ik_limits": "Foot IK workspace limits: pitch ~[-0.3, +0.4] rad, roll ~[-0.3, +0.3] rad. Safe scale values: 0.25-0.30 (stays within workspace)",
     "ik_groups": [
         {
             "name": "foot_0",
             "ik_type": "foot",
-            "motor_ids": [0, 1],
+            "motor_ids": [
+                0,
+                1
+            ],
             "chirp": {
                 "scale_pitch": 0.25,
                 "direction_pitch": 1.0,
@@ -47,4 +73,3 @@
         }
     ]
 }
-
