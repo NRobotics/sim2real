@@ -23,6 +23,12 @@ pip install --upgrade pip
 
 # Install sim2real with dev dependencies
 echo "Installing sim2real package..."
+# Install humanoid-protocol
+echo "Installing humanoid-protocol..."
+pip install -e humanoid-protocol/python
+
+# Install sim2real with dev dependencies
+echo "Installing sim2real package..."
 pip install -e ".[dev]"
 
 echo
