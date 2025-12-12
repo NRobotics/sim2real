@@ -15,7 +15,7 @@ This project provides tools for:
 ```
 sim2real/
 ├── ext/
-│   └── humanoid-protocol/     # Git submodule: CAN/UDP communication protocol
+│├── humanoid-protocol/     # Git submodule: CAN/UDP communication protocol
 ├── system_identification/     # Actuator system identification toolkit
 │   ├── system_identification.py
 │   ├── analyse.py

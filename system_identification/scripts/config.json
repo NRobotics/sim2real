@@ -6,50 +6,37 @@
         "fd": true
     },
     "chirp": {
-        "f_start": 0.1,
-        "f_end": 0.5,
+        "f_start": 0.05,
+        "f_end": 3.0,
         "duration": 20.0,
-        "sample_rate": 500.0,
+        "sample_rate": 400.0,
         "sweep_type": "linear",
         "rate_limit": true
     },
     "control_parameters": {
         "velocity": 0.0,
         "effort": 0.0,
-        "stiffness": 5.0,
-        "damping": 2.0
+        "stiffness": 3.0,
+        "damping": 0.5
     },
-    "motor_ids": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-    ],
+    "motor_ids": [ 4, 5],
     "_comment_formula": "All joints use: q(t) = scale * direction * (s(t) + bias), where s(t) is base chirp [-1, +1]",
     "_comment_motors": "Per-motor config for DIRECT control (motors not in ik_groups)",
     "_comment_motor_limits": "Direct motors: scale defines amplitude in radians. Typical safe range: 0.1-0.5 rad. Check motor joint limits before exceeding.",
     "motors": {
         "2": {
+            "name": "right_hip_roll", 
             "scale": 2.0,
             "direction": 1.0,
-            "bias": 0.0
+            "bias": 0.0,
+            "limits": [-1.5, 1.5]  
         },
         "3": {
+            "name": "left_hip_roll",
             "scale": 2.0,
             "direction": -1.0,
-            "bias": 0.0
-        },
-        "4": {
-            "scale": 2.0,
-            "direction": 1.0,
-            "bias": 0.0
-        },
-        "5": {
-            "scale": 2.0,
-            "direction": -1.0,
-            "bias": 0.0
+            "bias": 0.0,
+            "limits": [-1.5, 1.5]
         }
     },
     "_comment_ik_groups": "IK groups: IK inputs treated as 1-DOF joints, then IK converts to motor commands",
@@ -58,17 +45,19 @@
         {
             "name": "foot_0",
             "ik_type": "foot",
-            "motor_ids": [
-                0,
-                1
-            ],
+            "motor_ids": [4, 5],
+            "motor_names": ["ankle_pitch_left", "ankle_roll_left"],
             "chirp": {
                 "scale_pitch": 0.25,
                 "direction_pitch": 1.0,
                 "bias_pitch": 0.0,
-                "scale_roll": 0.25,
+                "scale_roll": 0.17,
                 "direction_roll": 1.0,
                 "bias_roll": 0.0
+            },
+            "limits": {
+                 "4": [-3.0, 3.0],
+                 "5": [-3.0, 3.0]
             }
         }
     ]

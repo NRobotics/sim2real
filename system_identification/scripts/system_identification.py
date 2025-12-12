@@ -28,6 +28,7 @@ from datetime import datetime
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 import numpy as np
 
@@ -551,6 +552,7 @@ class SystemIdentification:
 
     def _config_callback(self, can_id: int, config: ConfigurationData) -> None:
         """Callback for receiving motor configuration"""
+        motor_conf = self.config.get("motors", {}).get(str(can_id))
         self.motor_configs[can_id] = config
         print(f"Received configuration from motor {can_id}")
         if can_id in self.configs_to_receive:
@@ -587,9 +589,53 @@ class SystemIdentification:
         if not self.feedbacks_to_receive:
             self.feedback_received.set()
 
+    def _get_joint_name(self, can_id: int) -> str:
+        """Resolve a human-readable name for a CAN ID from the config."""
+        # 1. Check if it's in an IK group
+        if can_id in self.motor_to_ik_group:
+            group_name, idx = self.motor_to_ik_group[can_id]
+            
+            # Find the group config to check for explicit motor names
+            for group_cfg in self.config.get("ik_groups", []):
+                if group_cfg["name"] == group_name:
+                    if "motor_names" in group_cfg and len(group_cfg["motor_names"]) > idx:
+                        return group_cfg["motor_names"][idx]
+            
+            # Fallback for IK groups
+            return f"{group_name}_motor_{idx}"
+
+        # 2. Check direct motor config
+        motor_conf = self.config.get("motors", {}).get(str(can_id), {})
+        if "name" in motor_conf:
+            return motor_conf["name"]
+
+        # 3. Fallback to generic ID
+        return f"joint_can_{can_id}"
+
     def setup(self) -> None:
         """Initialize CAN controller and read motor configurations"""
         print(f"Starting CAN controller for motors: {self.motor_ids}")
+
+        # Initialize Safety Limits Dictionary ---
+        # Format: { can_id: (min_pos, max_pos) }
+        self.motor_limits: dict[int, tuple[float, float]] = {}
+
+        # 1. Load limits for Direct Motors from "motors" config
+        motors_conf = self.config.get("motors", {})
+        for mid_str, m_conf in motors_conf.items():
+            if "limits" in m_conf:
+                # Parse limits: [min, max]
+                self.motor_limits[int(mid_str)] = (float(m_conf["limits"][0]), float(m_conf["limits"][1]))
+
+        # 2. Load limits for IK Group Motors
+        # Note: If a motor is in both sections, IK group limits take precedence here due to load order
+        for group in self.config.get("ik_groups", []):
+            if "limits" in group:
+                for mid_str, limits in group["limits"].items():
+                    self.motor_limits[int(mid_str)] = (float(limits[0]), float(limits[1]))
+
+        print(f"Software Safety Limits loaded: {self.motor_limits}")
+
         with suppress_stdout():
             self.controller.start()
             time.sleep(0.1)
@@ -755,6 +801,17 @@ class SystemIdentification:
         if not self.ik_generators and not self.chirp_generators:
             raise ValueError("No chirp generators initialized! Check your config.")
 
+    def _clamp_angle(self, can_id: int, angle: float) -> float:
+        """Helper to clamp angle to configured limits."""
+        if can_id in self.motor_limits:
+            min_lim, max_lim = self.motor_limits[can_id]
+            # strict clamping
+            if angle < min_lim:
+                return min_lim
+            if angle > max_lim:
+                return max_lim
+        return angle
+
     def run_identification(self) -> None:
         """Main identification loop
         
@@ -850,12 +907,12 @@ class SystemIdentification:
                 # Create control data for each motor in the group
                 for i, motor_id in enumerate(group_motor_ids):
                     if i < len(motor_angles):
-                        angle = motor_angles[i]
-                        
-                        self.commanded_angles[motor_id] = angle
-                        
+                        raw_angle = motor_angles[i]
+                        self.commanded_angles[motor_id] = raw_angle
+
+                        safe_angle = self._clamp_angle(motor_id, raw_angle)
                         control_data[motor_id] = ControlData(
-                            angle=angle,
+                            angle=safe_angle,
                             velocity=control_params["velocity"],
                             effort=control_params["effort"],
                             stiffness=control_params["stiffness"],
@@ -868,15 +925,16 @@ class SystemIdentification:
                 if can_id not in self.chirp_generators:
                     continue
                     
-                angle, complete = self.chirp_generators[can_id].get_next()
+                raw_angle, complete = self.chirp_generators[can_id].get_next()
 
                 if complete:
                     is_complete = True
 
-                self.commanded_angles[can_id] = angle
+                self.commanded_angles[can_id] = raw_angle
+                safe_angle = self._clamp_angle(can_id, raw_angle)
 
                 control_data[can_id] = ControlData(
-                    angle=angle,
+                    angle=safe_angle,
                     velocity=control_params["velocity"],
                     effort=control_params["effort"],
                     stiffness=control_params["stiffness"],
@@ -1014,6 +1072,155 @@ class SystemIdentification:
             missed_pct = (missed_deadlines / self.sample_count) * 100
             print(f"⚠️  Missed deadlines: {missed_deadlines}/{self.sample_count} ({missed_pct:.1f}%)")
 
+    def save_plots(self, output_dir: str) -> None:
+        """Save plots for each motor and IK group with dual axes (Rad/Deg)"""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Warning: matplotlib not installed, skipping plots")
+            return
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        print(f"\nSaving plots to {output_path}...")
+
+        # Plot each motor
+        for can_id in self.motor_ids:
+            motor_data = self.feedback_data.get(can_id, [])
+            if not motor_data:
+                continue
+
+            timestamps = [d["timestamp"] for d in motor_data]
+            positions = [d["angle"] for d in motor_data]
+            commanded = [d["commanded_angle"] for d in motor_data]
+
+            plt.figure(figsize=(12, 6))
+            plt.plot(timestamps, positions, label="Measured", linewidth=1)
+            plt.plot(
+                timestamps,
+                commanded,
+                label="Commanded",
+                linestyle="dashed",
+                linewidth=1,
+            )
+            plt.title(f"Motor {can_id} - Position Tracking")
+            plt.xlabel("Time [s]")
+            plt.ylabel("Position [rad]")
+            
+            ax = plt.gca()
+            # Create a secondary axis that converts radians <-> degrees
+            secax = ax.secondary_yaxis('right', functions=(np.degrees, np.radians))
+            secax.set_ylabel('Position [deg]')
+
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+
+            plot_file = output_path / f"motor_{can_id}_{timestamp}.png"
+            plt.savefig(plot_file, dpi=150)
+            plt.close()
+            print(f"  Saved: {plot_file.name}")
+
+        # Plot FK for IK groups
+        if self.ik_generators:
+            for group_name, ik_gen in self.ik_generators.items():
+                group_motor_ids = []
+                for mid, (gname, idx) in self.motor_to_ik_group.items():
+                    if gname == group_name:
+                        group_motor_ids.append((idx, mid))
+                group_motor_ids.sort()
+                motor_ids_ordered = [mid for _, mid in group_motor_ids]
+
+                if ik_gen.ik_type == "foot" and len(motor_ids_ordered) == 2:
+                    lower_data = self.feedback_data.get(motor_ids_ordered[0], [])
+                    upper_data = self.feedback_data.get(motor_ids_ordered[1], [])
+
+                    if lower_data and upper_data:
+                        lower_by_sample = {d["sample"]: d for d in lower_data}
+                        upper_by_sample = {d["sample"]: d for d in upper_data}
+                        common_samples = sorted(
+                            set(lower_by_sample.keys()) & set(upper_by_sample.keys())
+                        )
+
+                        timestamps, pitches, rolls = [], [], []
+                        cmd_pitches, cmd_rolls = [], []
+
+                        for sample_idx in common_samples:
+                            q_lower = lower_by_sample[sample_idx]["angle"]
+                            q_upper = upper_by_sample[sample_idx]["angle"]
+                            pitch, roll = fk_motor_to_foot(q_lower, q_upper)
+
+                            timestamps.append(lower_by_sample[sample_idx]["timestamp"])
+                            
+                            # --- MODIFICATION: Keep data in Radians for left axis ---
+                            pitches.append(pitch) 
+                            rolls.append(roll)
+                            
+                            cmd_p = lower_by_sample[sample_idx].get("commanded_pitch")
+                            cmd_r = lower_by_sample[sample_idx].get("commanded_roll")
+                            # Keep commanded in Radians
+                            cmd_pitches.append(cmd_p if cmd_p is not None else 0.0)
+                            cmd_rolls.append(cmd_r if cmd_r is not None else 0.0)
+
+                        # Pitch plot
+                        plt.figure(figsize=(12, 6))
+                        plt.plot(timestamps, pitches, label="Measured", linewidth=1)
+                        plt.plot(
+                            timestamps,
+                            cmd_pitches,
+                            label="Commanded",
+                            linestyle="dashed",
+                            linewidth=1,
+                        )
+                        plt.title(f"{group_name} - Pitch (FK)")
+                        plt.xlabel("Time [s]")
+                        plt.ylabel("Pitch [rad]") # Left axis is now Radians
+                        
+                        # --- MODIFICATION START ---
+                        ax = plt.gca()
+                        secax = ax.secondary_yaxis('right', functions=(np.degrees, np.radians))
+                        secax.set_ylabel('Pitch [deg]')
+                        # --- MODIFICATION END ---
+                        
+                        plt.grid(True, alpha=0.3)
+                        plt.legend()
+                        plt.tight_layout()
+                        plot_file = output_path / f"{group_name}_pitch_{timestamp}.png"
+                        plt.savefig(plot_file, dpi=150)
+                        plt.close()
+                        print(f"  Saved: {plot_file.name}")
+
+                        # Roll plot
+                        plt.figure(figsize=(12, 6))
+                        plt.plot(timestamps, rolls, label="Measured", linewidth=1)
+                        plt.plot(
+                            timestamps,
+                            cmd_rolls,
+                            label="Commanded",
+                            linestyle="dashed",
+                            linewidth=1,
+                        )
+                        plt.title(f"{group_name} - Roll (FK)")
+                        plt.xlabel("Time [s]")
+                        plt.ylabel("Roll [rad]") # Left axis is now Radians
+                        
+                        # --- MODIFICATION START ---
+                        ax = plt.gca()
+                        secax = ax.secondary_yaxis('right', functions=(np.degrees, np.radians))
+                        secax.set_ylabel('Roll [deg]')
+                        # --- MODIFICATION END ---
+
+                        plt.grid(True, alpha=0.3)
+                        plt.legend()
+                        plt.tight_layout()
+                        plot_file = output_path / f"{group_name}_roll_{timestamp}.png"
+                        plt.savefig(plot_file, dpi=150)
+                        plt.close()
+                        print(f"  Saved: {plot_file.name}")
+
+        print(f"Plots saved to: {output_path}")
 
     def save_results(self, output_file: str) -> None:
         """Save collected feedback data as JSON"""
@@ -1028,97 +1235,22 @@ class SystemIdentification:
                 "samples_per_motor": {str(can_id): len(data) for can_id, data in self.feedback_data.items()},
             },
         }
-        
-        # Add IK group info and compute FK from measured motor positions
-        if self.ik_generators:
-            results["ik_groups"] = {}
-            for group_name, ik_gen in self.ik_generators.items():
-                # Get motor IDs for this group (ordered: index 0 = lower, index 1 = upper)
-                group_motor_ids = []
-                for mid, (gname, idx) in self.motor_to_ik_group.items():
-                    if gname == group_name:
-                        group_motor_ids.append((idx, mid))
-                group_motor_ids.sort()  # Sort by index to ensure order
-                motor_ids_ordered = [mid for _, mid in group_motor_ids]
-                
-                results["ik_groups"][group_name] = {
-                    "ik_type": ik_gen.ik_type,
-                    "input_names": ik_gen.input_names,
-                    "motor_ids": motor_ids_ordered,
-                }
-                
-                # Compute FK for foot IK type
-                if ik_gen.ik_type == "foot" and len(motor_ids_ordered) == 2:
-                    lower_motor_id = motor_ids_ordered[0]
-                    upper_motor_id = motor_ids_ordered[1]
-                    
-                    # Get feedback data for both motors
-                    lower_data = self.feedback_data.get(lower_motor_id, [])
-                    upper_data = self.feedback_data.get(upper_motor_id, [])
-                    
-                    if lower_data and upper_data:
-                        print(f"\nComputing FK for IK group '{group_name}'...")
-                        fk_data = []
-                        
-                        # Match samples by sample index
-                        lower_by_sample = {d["sample"]: d for d in lower_data}
-                        upper_by_sample = {d["sample"]: d for d in upper_data}
-                        
-                        common_samples = sorted(set(lower_by_sample.keys()) & set(upper_by_sample.keys()))
-                        
-                        for sample_idx in common_samples:
-                            q_lower = lower_by_sample[sample_idx]["angle"]
-                            q_upper = upper_by_sample[sample_idx]["angle"]
-                            
-                            pitch, roll = fk_motor_to_foot(q_lower, q_upper)
-                            
-                            fk_data.append({
-                                "sample": sample_idx,
-                                "timestamp": lower_by_sample[sample_idx]["timestamp"],
-                                "measured_pitch": pitch,
-                                "measured_roll": roll,
-                                "q_lower": q_lower,
-                                "q_upper": q_upper,
-                                # Include commanded values if available
-                                "commanded_pitch": lower_by_sample[sample_idx].get("commanded_pitch"),
-                                "commanded_roll": lower_by_sample[sample_idx].get("commanded_roll"),
-                            })
-                        
-                        results["ik_groups"][group_name]["fk_data"] = fk_data
-                        print(f"  Computed {len(fk_data)} FK samples for '{group_name}'")
-        
-        if self.direct_motors:
-            results["direct_motors"] = sorted(self.direct_motors)
 
         with Path(output_file).open("w") as f:
             json.dump(results, f, indent=2)
 
         print(f"\nResults saved to: {output_file}")
-        print(f"Motors identified: {self.motor_ids}")
-        if self.ik_generators:
-            print(f"IK groups: {list(self.ik_generators.keys())}")
-        if self.direct_motors:
-            print(f"Direct motors: {sorted(self.direct_motors)}")
 
-    def save_torch(self, output_file: str) -> None:
-        """Save collected data in PyTorch .pt format (compatible with Isaac sim scripts).
-        
-        Output format matches Isaac sim chirp script exactly:
-            {
-                "time": tensor (num_samples,) - timestamps
-                "dof_pos": tensor (num_samples, num_joints) - measured positions  
-                "des_dof_pos": tensor (num_samples, num_joints) - commanded positions
-                "joint_ids": list[int] - motor CAN IDs in column order
-            }
-        """
+
+    def save_hoku_style_data(self, output_dir: Path) -> None:
+        """Save data in the exact format required by the Hoku Sim2Real tools."""
         try:
             import torch
         except ImportError:
             print("Warning: PyTorch not installed, skipping .pt save")
             return
-        
-        # Get all motor data aligned by sample index
-        # Find common samples across all motors
+
+        # 1. Align Data by Time
         sample_sets = []
         for can_id in self.motor_ids:
             motor_data = self.feedback_data.get(can_id, [])
@@ -1126,209 +1258,93 @@ class SystemIdentification:
                 sample_sets.append({d["sample"] for d in motor_data})
         
         if not sample_sets:
-            print("Warning: No feedback data to save")
+            print("[WARN] No data found to save.")
             return
         
-        # Find samples that exist for ALL motors
         common_samples = sorted(set.intersection(*sample_sets))
         num_samples = len(common_samples)
         num_joints = len(self.motor_ids)
         
-        if num_samples == 0:
-            print("Warning: No common samples across all motors")
-            return
-        
-        # Build lookup dictionaries for each motor
-        motor_lookups = {}
-        for can_id in self.motor_ids:
-            motor_data = self.feedback_data.get(can_id, [])
-            motor_lookups[can_id] = {d["sample"]: d for d in motor_data}
-        
-        # Pre-allocate tensors (matching Isaac sim format exactly)
+        # 2. Prepare Tensors
         time_data = torch.zeros(num_samples)
         dof_pos = torch.zeros(num_samples, num_joints)
         des_dof_pos = torch.zeros(num_samples, num_joints)
         
-        # Fill tensors - each motor is a column (DOF)
+        # Resolve Joint Names 
+        # We will modify these names if FK is applied
+        joint_names = [self._get_joint_name(mid) for mid in self.motor_ids]
+
+        motor_lookups = {
+            can_id: {d["sample"]: d for d in self.feedback_data.get(can_id, [])}
+            for can_id in self.motor_ids
+        }
+
+        # 3. Fill Tensors with RAW data
         for i, sample_idx in enumerate(common_samples):
-            # Time from first motor (should be same for all)
-            first_motor = self.motor_ids[0]
-            time_data[i] = motor_lookups[first_motor][sample_idx]["timestamp"]
-            
-            # Each motor is a joint/DOF
+            time_data[i] = motor_lookups[self.motor_ids[0]][sample_idx]["timestamp"]
             for j, can_id in enumerate(self.motor_ids):
                 d = motor_lookups[can_id][sample_idx]
                 dof_pos[i, j] = d["angle"]
                 des_dof_pos[i, j] = d["commanded_angle"]
-        
-        # Save in Isaac sim compatible format
-        data = {
-            "time": time_data,
-            "dof_pos": dof_pos,
-            "des_dof_pos": des_dof_pos,
-            "joint_ids": self.motor_ids,  # Motor CAN IDs as joint order
-        }
-        
-        # Add metadata about IK groups so user knows which joint does what
-        if self.motor_to_ik_group:
-            # joint_info[i] describes column i in dof_pos/des_dof_pos
-            joint_info = []
-            for can_id in self.motor_ids:
-                if can_id in self.motor_to_ik_group:
-                    group_name, idx = self.motor_to_ik_group[can_id]
-                    ik_gen = self.ik_generators[group_name]
-                    # idx 0 = first motor (e.g., lower), idx 1 = second motor (e.g., upper)
-                    role = "lower" if idx == 0 else "upper"
-                    joint_info.append({
-                        "motor_id": can_id,
-                        "type": "ik",
-                        "ik_group": group_name,
-                        "ik_type": ik_gen.ik_type,
-                        "ik_index": idx,  # 0=lower, 1=upper for foot
-                        "role": role,
-                        "ik_inputs": ik_gen.input_names,  # e.g., ["pitch", "roll"]
-                    })
-                else:
-                    joint_info.append({
-                        "motor_id": can_id,
-                        "type": "direct",
-                    })
-            data["joint_info"] = joint_info
-            
-            # Also add IK group summary
-            ik_groups_info = {}
-            for group_name, ik_gen in self.ik_generators.items():
-                group_motor_ids = []
-                for mid, (gname, idx) in self.motor_to_ik_group.items():
-                    if gname == group_name:
-                        group_motor_ids.append((idx, mid))
-                group_motor_ids.sort()
-                motor_ids_ordered = [mid for _, mid in group_motor_ids]
-                
-                # Find column indices in dof_pos for this group's motors
-                col_indices = [self.motor_ids.index(mid) for mid in motor_ids_ordered]
-                
-                ik_groups_info[group_name] = {
-                    "ik_type": ik_gen.ik_type,
-                    "input_names": ik_gen.input_names,
-                    "motor_ids": motor_ids_ordered,
-                    "column_indices": col_indices,  # Which columns in dof_pos
-                }
-            data["ik_groups"] = ik_groups_info
-        
-        torch.save(data, output_file)
-        print(f"Torch data saved to: {output_file}")
-        print(f"  Shape: time={tuple(time_data.shape)}, dof_pos={tuple(dof_pos.shape)}, des_dof_pos={tuple(des_dof_pos.shape)}")
-        print(f"  Joint IDs (column order): {self.motor_ids}")
-        if self.motor_to_ik_group:
-            for group_name, info in data.get("ik_groups", {}).items():
-                print(f"  IK group '{group_name}': columns {info['column_indices']} = motors {info['motor_ids']} ({info['ik_type']})")
 
-    def save_plots(self, output_dir: str) -> None:
-        """Save plots for each motor and IK group"""
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("Warning: matplotlib not installed, skipping plots")
-            return
-        
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        print(f"\nSaving plots to {output_path}...")
-        
-        # Plot each motor
-        for can_id in self.motor_ids:
-            motor_data = self.feedback_data.get(can_id, [])
-            if not motor_data:
-                continue
-            
-            timestamps = [d["timestamp"] for d in motor_data]
-            positions = [d["angle"] for d in motor_data]
-            commanded = [d["commanded_angle"] for d in motor_data]
-            
-            plt.figure(figsize=(12, 6))
-            plt.plot(timestamps, positions, label="Measured", linewidth=1)
-            plt.plot(timestamps, commanded, label="Commanded", linestyle='dashed', linewidth=1)
-            plt.title(f"Motor {can_id} - Position Tracking")
-            plt.xlabel("Time [s]")
-            plt.ylabel("Position [rad]")
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            plt.tight_layout()
-            
-            plot_file = output_path / f"motor_{can_id}_{timestamp}.png"
-            plt.savefig(plot_file, dpi=150)
-            plt.close()
-            print(f"  Saved: {plot_file.name}")
-        
-        # Plot FK for IK groups
+        # 4. Perform FK and Overwrite
         if self.ik_generators:
             for group_name, ik_gen in self.ik_generators.items():
-                group_motor_ids = []
-                for mid, (gname, idx) in self.motor_to_ik_group.items():
-                    if gname == group_name:
-                        group_motor_ids.append((idx, mid))
-                group_motor_ids.sort()
-                motor_ids_ordered = [mid for _, mid in group_motor_ids]
+                if ik_gen.ik_type != "foot": continue
+
+                # Get sorted motors (0: Lower/Pitch, 1: Upper/Roll)
+                group_motor_ids = [mid for mid, (gname, _) in self.motor_to_ik_group.items() if gname == group_name]
+                group_motor_ids.sort(key=lambda m: self.motor_to_ik_group[m][1])
+
+                if len(group_motor_ids) != 2: continue
                 
-                if ik_gen.ik_type == "foot" and len(motor_ids_ordered) == 2:
-                    lower_data = self.feedback_data.get(motor_ids_ordered[0], [])
-                    upper_data = self.feedback_data.get(motor_ids_ordered[1], [])
-                    
-                    if lower_data and upper_data:
-                        lower_by_sample = {d["sample"]: d for d in lower_data}
-                        upper_by_sample = {d["sample"]: d for d in upper_data}
-                        common_samples = sorted(set(lower_by_sample.keys()) & set(upper_by_sample.keys()))
-                        
-                        timestamps, pitches, rolls = [], [], []
-                        cmd_pitches, cmd_rolls = [], []
-                        
-                        for sample_idx in common_samples:
-                            q_lower = lower_by_sample[sample_idx]["angle"]
-                            q_upper = upper_by_sample[sample_idx]["angle"]
-                            pitch, roll = fk_motor_to_foot(q_lower, q_upper)
-                            
-                            timestamps.append(lower_by_sample[sample_idx]["timestamp"])
-                            pitches.append(np.degrees(pitch))
-                            rolls.append(np.degrees(roll))
-                            cmd_p = lower_by_sample[sample_idx].get("commanded_pitch")
-                            cmd_r = lower_by_sample[sample_idx].get("commanded_roll")
-                            cmd_pitches.append(np.degrees(cmd_p) if cmd_p else 0.0)
-                            cmd_rolls.append(np.degrees(cmd_r) if cmd_r else 0.0)
-                        
-                        # Pitch plot
-                        plt.figure(figsize=(12, 6))
-                        plt.plot(timestamps, pitches, label="Measured", linewidth=1)
-                        plt.plot(timestamps, cmd_pitches, label="Commanded", linestyle='dashed', linewidth=1)
-                        plt.title(f"{group_name} - Pitch (FK)")
-                        plt.xlabel("Time [s]")
-                        plt.ylabel("Pitch [deg]")
-                        plt.grid(True, alpha=0.3)
-                        plt.legend()
-                        plt.tight_layout()
-                        plot_file = output_path / f"{group_name}_pitch_{timestamp}.png"
-                        plt.savefig(plot_file, dpi=150)
-                        plt.close()
-                        print(f"  Saved: {plot_file.name}")
-                        
-                        # Roll plot
-                        plt.figure(figsize=(12, 6))
-                        plt.plot(timestamps, rolls, label="Measured", linewidth=1)
-                        plt.plot(timestamps, cmd_rolls, label="Commanded", linestyle='dashed', linewidth=1)
-                        plt.title(f"{group_name} - Roll (FK)")
-                        plt.xlabel("Time [s]")
-                        plt.ylabel("Roll [deg]")
-                        plt.grid(True, alpha=0.3)
-                        plt.legend()
-                        plt.tight_layout()
-                        plot_file = output_path / f"{group_name}_roll_{timestamp}.png"
-                        plt.savefig(plot_file, dpi=150)
-                        plt.close()
-                        print(f"  Saved: {plot_file.name}")
+                id_pitch, id_roll = group_motor_ids[0], group_motor_ids[1]
+                idx_pitch = self.motor_ids.index(id_pitch)
+                idx_roll = self.motor_ids.index(id_roll)
+
+                # Rename joints in the list to reflect data content
+                # e.g., "left_ankle_motor_a" -> "left_foot_pitch"
+                joint_names[idx_pitch] = f"{group_name}_pitch"
+                joint_names[idx_roll] = f"{group_name}_roll"
+
+                # Apply FK
+                q_l_meas, q_u_meas = dof_pos[:, idx_pitch].tolist(), dof_pos[:, idx_roll].tolist()
+                q_l_cmd, q_u_cmd = des_dof_pos[:, idx_pitch].tolist(), des_dof_pos[:, idx_roll].tolist()
+                
+                # Compute Meas FK
+                meas_p, meas_r = [], []
+                for ql, qu in zip(q_l_meas, q_u_meas):
+                    p, r = fk_motor_to_foot(ql, qu)
+                    meas_p.append(p)
+                    meas_r.append(r)
+
+                # Compute Cmd FK
+                cmd_p, cmd_r = [], []
+                for ql, qu in zip(q_l_cmd, q_u_cmd):
+                    p, r = fk_motor_to_foot(ql, qu)
+                    cmd_p.append(p)
+                    cmd_r.append(r)
+
+                # Overwrite tensors
+                dof_pos[:, idx_pitch] = torch.tensor(meas_p)
+                des_dof_pos[:, idx_pitch] = torch.tensor(cmd_p)
+                
+                dof_pos[:, idx_roll] = torch.tensor(meas_r)
+                des_dof_pos[:, idx_roll] = torch.tensor(cmd_r)
+
+        # 5. Save
+        save_path = output_dir / "chirp_data.pt"
+        torch.save(
+            {
+                "time": time_data.cpu(),
+                "dof_pos": dof_pos.cpu(),
+                "des_dof_pos": des_dof_pos.cpu(),
+                "joint_names": joint_names, 
+            },
+            save_path,
+        )
+        print(f"[INFO] Saved Sim2Real formatted data to {save_path}")
         
-        print(f"Plots saved to: {output_path}")
 
     def cleanup(self) -> None:
         """Stop all motors and close CAN controller"""
@@ -1460,20 +1476,20 @@ To add new IK types, use IKRegistry.register() in your code.
         "--save",
         "-s",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Save results to JSON file (default: False). Use --save to enable.",
+        default=True,
+        help="Save results to JSON file (default: True). Use --no-save to disable.",
     )
     parser.add_argument(
         "--save-plots",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Save plots for each motor/joint (default: False). Use --save-plots to enable.",
+        default=True,
+        help="Save plots for each motor/joint (default: True). Use --no-save-plots to disable.",
     )
     parser.add_argument(
         "--save-torch",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Save data in PyTorch .pt format (default: False). Use --save-torch to enable.",
+        default=True,
+        help="Save data in PyTorch .pt format (default: True). Use --no-save-torch to disable.",
     )
     parser.add_argument(
         "--list-ik",
@@ -1526,24 +1542,19 @@ To add new IK types, use IKRegistry.register() in your code.
         output_dir = output_base / f"sysid_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nOutput folder: {output_dir}")
-        
-        # Save JSON results
+         
         if args.save:
-            output_file = output_dir / "results.json"
-            sysid.save_results(str(output_file))
-        else:
-            print("JSON results not saved (--no-save specified)")
+            # 1. Save standard JSON (Good for debugging)
+            sysid.save_results(str(output_dir / "raw_debug_data.json"))
         
-        # Save PyTorch format
-        if args.save_torch:
-            torch_file = output_dir / "results.pt"
-            sysid.save_torch(str(torch_file))
-        
-        # Save plots
-        if args.save_plots:
-            plots_dir = output_dir / "plots"
-            sysid.save_plots(str(plots_dir))
-            
+            # 2. Save Hoku-Style Data (.pt) - The critical file for Sim2Real
+            if args.save_torch:
+                sysid.save_hoku_style_data(output_dir)
+
+            # 3. Save Plots
+            if args.save_plots:
+                sysid.save_plots(output_dir)
+                                   
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     except Exception as e:
