@@ -8,7 +8,7 @@
     "chirp": {
         "f_start": 0.05,
         "f_end": 3.0,
-        "duration": 20.0,
+        "duration": 5.0,
         "sample_rate": 400.0,
         "sweep_type": "linear",
         "rate_limit": true
