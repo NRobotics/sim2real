@@ -107,71 +107,12 @@ IKRegistry.register(
 )
 
 
-class MockMotorCANController:
-    """Mock controller for dry-run mode (no hardware required)"""
-
-    def __init__(self, **kwargs):
-        self._config_callbacks: dict = {}
-        self._feedback_callbacks: dict = {}
-        print("[DRY-RUN] Mock CAN controller initialized")
-
-    def start(self):
-        print("[DRY-RUN] Mock CAN controller started")
-
-    def stop(self):
-        print("[DRY-RUN] Mock CAN controller stopped")
-
-    def set_config_callback(self, can_id: int, callback):
-        self._config_callbacks[can_id] = callback
-
-    def set_feedback_callback(self, can_id: int, callback):
-        self._feedback_callbacks[can_id] = callback
-
-    def get_motor_configuration(self, can_id: int):
-        """Simulate receiving motor configuration"""
-        if can_id in self._config_callbacks:
-            # Create mock configuration with correct fields
-            mock_config = ConfigurationData(
-                can_id=can_id,
-                device_type=0,
-                inverse_direction=False,
-                endstop_alignment_inverse=False,
-                endstop_alignment_skip=False,
-                endstop_zero_offset=0.0,
-                endstop_damping=0.1,
-                endstop_position_min=-3.14159,
-                endstop_position_max=3.14159,
-            )
-            self._config_callbacks[can_id](can_id, mock_config)
-
-    def start_motor(self, can_id: int):
-        print(f"[DRY-RUN] Motor {can_id} started")
-
-    def stop_all_motors(self):
-        print("[DRY-RUN] All motors stopped")
-
-    def send_kinematics_for_motor(self, can_id: int, control_data: ControlData):
-        """Simulate receiving feedback after sending control"""
-        if can_id in self._feedback_callbacks:
-            # Simulate feedback with some noise
-            mock_feedback = FeedbackData(
-                angle=control_data.angle + np.random.normal(0, 0.01),
-                velocity=control_data.velocity + np.random.normal(0, 0.1),
-                effort=control_data.effort + np.random.normal(0, 0.05),
-                voltage=24.0 + np.random.normal(0, 0.1),
-                temp_motor=35.0 + np.random.normal(0, 1.0),
-                temp_pcb=30.0 + np.random.normal(0, 0.5),
-                flags=0,
-            )
-            self._feedback_callbacks[can_id](can_id, mock_feedback)
-
-
 class ChirpGenerator:
     """
     Generate chirp (frequency sweep) signals for system identification.
     
     Uses the same transformation as IK inputs:
-        q(t) = scale * direction * (s(t) + bias)
+        q(t) = scale * direction * s(t) + bias
     
     Where s(t) = sin(phase(t)) is the base chirp signal ranging -1 to +1.
     """
@@ -197,10 +138,10 @@ class ChirpGenerator:
             sweep_type: 'linear', 'logarithmic', or 'exponential'
             scale: Scale factor [rad]
             direction: Direction multiplier (+1 or -1)
-            bias: Bias added to base signal before scaling
+            bias: Bias added after scaling [rad]
             
         The transformation is:
-            q(t) = scale * direction * (s(t) + bias)
+            q(t) = scale * direction * s(t) + bias
             
         Where s(t) = sin(phase(t)) ranges from -1 to +1.
         """
@@ -224,7 +165,7 @@ class ChirpGenerator:
         
         # Compute effective parameters for logging
         self.effective_amplitude = abs(self.scale * self.direction)
-        self.effective_offset = self.scale * self.direction * self.bias
+        self.effective_offset = self.bias
 
     def _generate_base_chirp(self) -> np.ndarray:
         """Generate base chirp signal s(t) = sin(phase(t)), ranging -1 to +1"""
@@ -252,8 +193,8 @@ class ChirpGenerator:
         return np.sin(phase)
 
     def _transform_signal(self) -> np.ndarray:
-        """Transform base signal: q(t) = scale * direction * (s(t) + bias)"""
-        return self.scale * self.direction * (self.base_signal + self.bias)
+        """Transform base signal: q(t) = scale * direction * s(t) + bias"""
+        return self.scale * self.direction * self.base_signal + self.bias
 
     def get_next(self) -> tuple[float, bool]:
         """Get next sample value. Returns (value, is_complete)"""
@@ -280,12 +221,12 @@ class IKChirpGenerator:
     Each IK input (pitch, roll) is treated as an independent 1-DOF joint.
     Each gets the SAME base chirp s(t), but transformed with its own parameters:
     
-        q_j(t) = scale_j * direction_j * (s(t) + bias_j)
+        q_j(t) = scale_j * direction_j * s(t) + bias_j
     
     Where s(t) = sin(phase(t)) is the base chirp signal.
     
     This means:
-        - Effective offset = scale * direction * bias
+        - Effective offset = bias
         - Effective amplitude = scale * direction
     """
 
@@ -297,7 +238,7 @@ class IKChirpGenerator:
         duration: float,
         sample_rate: float,
         sweep_type: str = "linear",
-        # Per-input transformation parameters: q = scale * direction * (s(t) + bias)
+        # Per-input transformation parameters: q = scale * direction * s(t) + bias
         scale_1: float = 1.0,
         scale_2: float = 1.0,
         direction_1: float = 1.0,
@@ -316,10 +257,10 @@ class IKChirpGenerator:
             sweep_type: 'linear', 'logarithmic', or 'exponential'
             scale_1, scale_2: Scale factors for each input [rad]
             direction_1, direction_2: Direction multipliers (+1 or -1)
-            bias_1, bias_2: Bias added to base signal before scaling
+            bias_1, bias_2: Bias added after scaling [rad]
             
         The transformation for each input is:
-            input_j(t) = scale_j * direction_j * (s(t) + bias_j)
+            input_j(t) = scale_j * direction_j * s(t) + bias_j
             
         Where s(t) = sin(phase(t)) ranges from -1 to +1.
         """
@@ -338,7 +279,7 @@ class IKChirpGenerator:
         self.sample_rate = sample_rate
         self.sweep_type = sweep_type
 
-        # Per-input transformation: q = scale * direction * (s(t) + bias)
+        # Per-input transformation: q = scale * direction * s(t) + bias
         self.scale_1 = scale_1
         self.scale_2 = scale_2
         self.direction_1 = direction_1
@@ -360,8 +301,8 @@ class IKChirpGenerator:
         # Compute effective parameters for logging
         self.effective_amplitude_1 = abs(self.scale_1 * self.direction_1)
         self.effective_amplitude_2 = abs(self.scale_2 * self.direction_2)
-        self.effective_offset_1 = self.scale_1 * self.direction_1 * self.bias_1
-        self.effective_offset_2 = self.scale_2 * self.direction_2 * self.bias_2
+        self.effective_offset_1 = self.bias_1
+        self.effective_offset_2 = self.bias_2
 
     def _generate_base_chirp(self) -> np.ndarray:
         """Generate base chirp signal s(t) = sin(phase(t)), ranging from -1 to +1"""
@@ -393,12 +334,12 @@ class IKChirpGenerator:
         """
         Transform base signal to per-input signals.
         
-        Formula: q_j(t) = scale_j * direction_j * (s(t) + bias_j)
+        Formula: q_j(t) = scale_j * direction_j * s(t) + bias_j
         """
         s = self.base_signal
         
-        signal_1 = self.scale_1 * self.direction_1 * (s + self.bias_1)
-        signal_2 = self.scale_2 * self.direction_2 * (s + self.bias_2)
+        signal_1 = self.scale_1 * self.direction_1 * s + self.bias_1
+        signal_2 = self.scale_2 * self.direction_2 * s + self.bias_2
         
         return signal_1, signal_2
 
@@ -505,6 +446,9 @@ class SystemIdentification:
         # Commanded angle tracking (for comparison with feedback)
         self.commanded_angles: dict[int, float] = {}
         
+        # Current motor positions from feedback (for interpolation)
+        self.current_positions: dict[int, float] = {}
+        
         # IK input tracking for logging
         self.commanded_ik_inputs: dict[str, dict[str, float]] = {}
 
@@ -531,6 +475,9 @@ class SystemIdentification:
 
     def _feedback_callback(self, can_id: int, feedback: FeedbackData) -> None:
         """Callback for receiving motor feedback"""
+        # Update current position for interpolation
+        self.current_positions[can_id] = feedback.angle
+        
         # Store feedback with timestamp and commanded angle
         feedback_dict = asdict(feedback)
         feedback_dict["timestamp"] = time.time() - self.start_time
@@ -654,7 +601,7 @@ class SystemIdentification:
             input_names = ik_info["input_names"]
             
             # Get per-input chirp parameters for this group
-            # Formula: q_j(t) = scale_j * direction_j * (s(t) + bias_j)
+            # Formula: q_j(t) = scale_j * direction_j * s(t) + bias_j
             group_chirp = group_config.get("chirp", {})
             
             # Scale factors (effective amplitude = |scale * direction|)
@@ -665,9 +612,16 @@ class SystemIdentification:
             direction_1 = group_chirp.get(f"direction_{input_names[0]}", group_chirp.get("direction_1", 1.0))
             direction_2 = group_chirp.get(f"direction_{input_names[1]}", group_chirp.get("direction_2", 1.0))
             
-            # Bias added to base signal before scaling
+            # Bias added after scaling
             bias_1 = group_chirp.get(f"bias_{input_names[0]}", group_chirp.get("bias_1", 0.0))
             bias_2 = group_chirp.get(f"bias_{input_names[1]}", group_chirp.get("bias_2", 0.0))
+            
+            # Validate motor count matches IK function output
+            motor_count = len(motor_ids)
+            expected_motor_count = ik_info["motor_count"]
+            if motor_count != expected_motor_count:
+                print(f"Error: IK group '{group_name}' has {motor_count} motors but IK type '{ik_type}' expects {expected_motor_count} motors")
+                continue
             
             # Create IK chirp generator
             self.ik_generators[group_name] = IKChirpGenerator(
@@ -686,6 +640,9 @@ class SystemIdentification:
             )
             
             # Map motors to this group
+            # IMPORTANT: The order of motor_ids in the group definition must match
+            # the order of angles returned by the IK function (e.g., for foot IK:
+            # motor_ids[0] should be the lower motor, motor_ids[1] should be the upper motor)
             for idx, mid in enumerate(motor_ids):
                 self.motor_to_ik_group[mid] = (group_name, idx)
                 motors_in_ik_groups.add(mid)
@@ -738,7 +695,7 @@ class SystemIdentification:
         for can_id in self.direct_motors:
             motor_config = motors_config[str(can_id)]
             
-            # Per-motor transformation: q(t) = scale * direction * (s(t) + bias)
+            # Per-motor transformation: q(t) = scale * direction * s(t) + bias
             scale = motor_config.get("scale", 1.0)
             direction = motor_config.get("direction", 1.0)
             bias = motor_config.get("bias", 0.0)
@@ -779,6 +736,385 @@ class SystemIdentification:
                 return max_lim
         return angle
 
+    def _angular_interpolation(self, start_angles: dict[int, float], target_angles: dict[int, float], alpha: float) -> dict[int, float]:
+        """Interpolate between start and target angles using shortest angular path.
+        
+        Args:
+            start_angles: Dict mapping motor_id -> start angle [rad]
+            target_angles: Dict mapping motor_id -> target angle [rad]
+            alpha: Interpolation factor [0.0, 1.0]
+            
+        Returns:
+            Dict mapping motor_id -> interpolated angle [rad]
+        """
+        interpolated = {}
+        for can_id in target_angles:
+            if can_id not in start_angles:
+                # If no start angle, use current position or zero
+                start_angle = self.current_positions.get(can_id, 0.0)
+            else:
+                start_angle = start_angles[can_id]
+            
+            target_angle = target_angles[can_id]
+            
+            # Calculate the angular difference
+            diff = target_angle - start_angle
+            
+            # Wrap the difference to [-π, π] to find shortest path
+            diff = (diff + np.pi) % (2 * np.pi) - np.pi
+            
+            # Interpolate using the shortest angular path
+            interpolated[can_id] = start_angle + diff * alpha
+        
+        return interpolated
+
+    def _get_current_positions(self, timeout: float = 1.0) -> dict[int, float]:
+        """Get current motor positions from feedback.
+        
+        Args:
+            timeout: Maximum time to wait for feedback [s]
+            
+        Returns:
+            Dict mapping motor_id -> current angle [rad]
+        """
+        # Request feedback from all motors by sending current commands
+        # (feedback is typically received after sending a command)
+        self.feedbacks_to_receive = set(self.motor_ids)
+        self.feedback_received.clear()
+        stiffness = 0
+        damping = 0
+        # Send current commanded positions (or zero if not set) to trigger feedback
+        control_data = {}
+        for can_id in self.motor_ids:
+            current_cmd = self.commanded_angles.get(can_id, 0.0)
+            motor_control_params = self._get_control_params(can_id)
+            control_data[can_id] = ControlData(
+                angle=current_cmd,
+                velocity=motor_control_params["velocity"],
+                effort=motor_control_params["effort"],
+                stiffness=stiffness,
+                damping=damping,
+            )
+        
+        # Send commands to trigger feedback
+        for can_id, ctrl_data in control_data.items():
+            self.controller.send_kinematics_for_motor(can_id, ctrl_data)
+        
+        # Wait for feedback
+        if self.feedback_received.wait(timeout=timeout):
+            return self.current_positions.copy()
+        else:
+            # Timeout - return what we have, or zeros
+            return {can_id: self.current_positions.get(can_id, 0.0) for can_id in self.motor_ids}
+
+    def _check_positions_reached(self, target_positions: dict[int, float], tolerance: float = 0.05, max_wait_time: float = 3.0) -> bool:
+        """Check if motors have reached target positions within tolerance.
+        
+        Args:
+            target_positions: Dict mapping motor_id -> target angle [rad]
+            tolerance: Maximum angular error to consider "reached" [rad] (default: 0.05 rad ≈ 2.9°)
+            max_wait_time: Maximum time to wait for motors to reach targets [s]
+            
+        Returns:
+            True if all motors reached targets, False otherwise
+        """
+        start_time = time.perf_counter()
+        check_period = 0.1  # Check every 100ms
+        
+        while time.perf_counter() - start_time < max_wait_time:
+            # Get current positions
+            current_positions = self._get_current_positions(timeout=0.5)
+            
+            # Check all motors
+            all_reached = True
+            max_error = 0.0
+            errors = {}
+            
+            for can_id, target_angle in target_positions.items():
+                if can_id not in current_positions:
+                    all_reached = False
+                    continue
+                
+                current_angle = current_positions[can_id]
+                
+                # Calculate angular error (handle wrapping)
+                error = target_angle - current_angle
+                error = (error + np.pi) % (2 * np.pi) - np.pi  # Wrap to [-π, π]
+                error = abs(error)
+                
+                errors[can_id] = error
+                max_error = max(max_error, error)
+                
+                if error > tolerance:
+                    all_reached = False
+            
+            if all_reached:
+                print(f"  ✓ All motors reached target positions (max error: {max_error*180/np.pi:.2f}°)")
+                return True
+            
+            # Print progress for motors not yet reached
+            if time.perf_counter() - start_time >= 1.0:  # Print every second
+                unreached = [can_id for can_id, err in errors.items() if err > tolerance]
+                if unreached:
+                    max_err_deg = max_error * 180 / np.pi
+                    print(f"  Waiting for motors {unreached} to reach targets (max error: {max_err_deg:.2f}°, tolerance: {tolerance*180/np.pi:.2f}°)")
+            
+            time.sleep(check_period)
+        
+        # Timeout - print final status
+        current_positions = self._get_current_positions(timeout=0.5)
+        print(f"  ⚠️  Timeout waiting for motors to reach targets (waited {max_wait_time}s)")
+        for can_id, target_angle in target_positions.items():
+            if can_id in current_positions:
+                current_angle = current_positions[can_id]
+                error = target_angle - current_angle
+                error = (error + np.pi) % (2 * np.pi) - np.pi
+                error_deg = abs(error) * 180 / np.pi
+                if abs(error) > tolerance:
+                    print(f"    Motor {can_id}: target={target_angle*180/np.pi:.2f}°, current={current_angle*180/np.pi:.2f}°, error={error_deg:.2f}°")
+        
+        return False
+
+    def _get_control_params(self, can_id: int) -> dict:
+        """Get control parameters for a motor.
+        
+        Priority order:
+        1. Per-motor control parameters (in motors section)
+        2. Per-group control parameters (in ik_groups section)
+        3. Global control_parameters
+        
+        Returns dict with keys: velocity, effort, stiffness, damping
+        """
+        global_params = self.config["control_parameters"]
+        
+        # 1. Check per-motor config (for direct motors)
+        motors_config = self.config.get("motors", {})
+        motor_config = motors_config.get(str(can_id), {})
+        if "control_parameters" in motor_config:
+            motor_params = motor_config["control_parameters"]
+            # Merge with global defaults for any missing keys
+            return {
+                "velocity": motor_params.get("velocity", global_params["velocity"]),
+                "effort": motor_params.get("effort", global_params["effort"]),
+                "stiffness": motor_params.get("stiffness", global_params["stiffness"]),
+                "damping": motor_params.get("damping", global_params["damping"]),
+            }
+        
+        # 2. Check per-group config (for IK group motors)
+        if can_id in self.motor_to_ik_group:
+            group_name, _ = self.motor_to_ik_group[can_id]
+            for group_cfg in self.config.get("ik_groups", []):
+                if group_cfg["name"] == group_name:
+                    if "control_parameters" in group_cfg:
+                        group_params = group_cfg["control_parameters"]
+                        # Merge with global defaults for any missing keys
+                        return {
+                            "velocity": group_params.get("velocity", global_params["velocity"]),
+                            "effort": group_params.get("effort", global_params["effort"]),
+                            "stiffness": group_params.get("stiffness", global_params["stiffness"]),
+                            "damping": group_params.get("damping", global_params["damping"]),
+                        }
+                    break
+        
+        # 3. Fall back to global
+        return global_params.copy()
+
+    def _initialize_to_chirp_start(self, interpolation_duration: float = 2.0) -> None:
+        """Initialize motors: smoothly interpolate from current position to initial chirp position.
+        
+        Args:
+            interpolation_duration: Time to interpolate from current to initial position [s]
+        """
+        print("\n=== Initialization Phase ===")
+        print("Step 1: Getting current motor positions...")
+        
+        # Step 1: Get current positions (wherever motors currently are)
+        start_positions = self._get_current_positions(timeout=1.0)
+        print(f"  Start positions: {start_positions}")
+        
+        # Step 2: Get initial chirp positions (first sample from generators)
+        print("Step 2: Computing initial chirp positions...")
+        target_positions = {}
+        
+        # Get target positions from direct motors
+        for can_id in self.direct_motors:
+            # Only process motors that are in motor_ids
+            if can_id not in self.motor_ids:
+                continue
+            if can_id in self.chirp_generators:
+                # Reset generator and get first sample
+                self.chirp_generators[can_id].reset()
+                angle, _ = self.chirp_generators[can_id].get_next()
+                target_positions[can_id] = angle
+        
+        # Get target positions from IK groups
+        for group_name, ik_gen in self.ik_generators.items():
+            # Get motor IDs for this group
+            group_motor_ids = [
+                mid for mid, (gname, _) in self.motor_to_ik_group.items() 
+                if gname == group_name
+            ]
+            
+            # Only process this IK group if at least one motor is in motor_ids
+            group_motor_ids_in_scope = [mid for mid in group_motor_ids if mid in self.motor_ids]
+            if not group_motor_ids_in_scope:
+                continue  # Skip IK groups with no motors in motor_ids
+            
+            # Sort by index in group
+            group_motor_ids_in_scope = sorted(
+                group_motor_ids_in_scope, 
+                key=lambda mid: self.motor_to_ik_group[mid][1]
+            )
+            
+            ik_gen.reset()
+            _, motor_angles, _ = ik_gen.get_next()
+            
+            # Map motor angles to motors based on their position in the original group
+            # Note: IK function returns angles in a fixed order (e.g., q_lower, q_upper for foot IK)
+            # The group's motor_ids order must match this IK function's return order
+            for motor_id in group_motor_ids_in_scope:
+                # Find the index of this motor in the original group order
+                original_idx = self.motor_to_ik_group[motor_id][1]
+                if original_idx < len(motor_angles):
+                    target_positions[motor_id] = motor_angles[original_idx]
+                else:
+                    print(f"Warning: Motor {motor_id} in group '{group_name}' has index {original_idx} but IK function only returned {len(motor_angles)} angles")
+        
+        print(f"  Target positions: {target_positions}")
+        
+        # Step 3: Smoothly interpolate from current positions to initial chirp positions
+        print(f"Step 3: Interpolating to initial positions over {interpolation_duration}s...")
+        interpolation_start = time.perf_counter()
+        interpolation_rate = 50.0  # Hz for smooth interpolation
+        interpolation_period = 1.0 / interpolation_rate
+        
+        while True:
+            elapsed = time.perf_counter() - interpolation_start
+            alpha = min(1.0, elapsed / interpolation_duration)
+            
+            # Compute interpolated positions
+            interpolated = self._angular_interpolation(start_positions, target_positions, alpha)
+            print(f"  Interpolated positions: {interpolated}")
+            
+            # Send interpolated commands
+            control_data = {}
+            for can_id in self.motor_ids:
+                if can_id in interpolated:
+                    angle = interpolated[can_id]
+                    self.commanded_angles[can_id] = angle
+                    motor_control_params = self._get_control_params(can_id)
+                    control_data[can_id] = ControlData(
+                        angle=angle,
+                        velocity=motor_control_params["velocity"],
+                        effort=motor_control_params["effort"],
+                        stiffness=motor_control_params["stiffness"],
+                        damping=motor_control_params["damping"],
+                    )
+            
+            # Send commands
+            self.feedbacks_to_receive = set(self.motor_ids)
+            self.feedback_received.clear()
+            for can_id, ctrl_data in control_data.items():
+                self.controller.send_kinematics_for_motor(can_id, ctrl_data)
+            
+            # Wait for feedback (with timeout)
+            self.feedback_received.wait(timeout=0.1)
+            
+            # Check if interpolation complete
+            if alpha >= 1.0:
+                break
+            
+            # Rate limit interpolation
+            time.sleep(interpolation_period)
+        
+        # # Step 4: Verify motors reached initial positions
+        # print("Step 4: Verifying motors reached initial positions...")
+        # position_tolerance = self.config.get("position_tolerance", 0.05)  # Default: 0.05 rad ≈ 2.9°
+        # reached = self._check_positions_reached(target_positions, tolerance=position_tolerance, max_wait_time=3.0)
+        
+        # if reached:
+        #     print("  ✓ All motors reached initial chirp positions. Starting data collection...\n")
+        # else:
+        #     print("  ⚠️  Warning: Some motors did not reach initial positions, but proceeding with data collection...\n")
+        
+
+        # Reset generators to start from beginning (we already consumed first sample)
+        for gen in self.chirp_generators.values():
+            gen.reset()
+        for gen in self.ik_generators.values():
+            gen.reset()
+
+    def _finalize_to_zero(self, interpolation_duration: float = 2.0) -> None:
+        """Finalize: smoothly interpolate from current position back to zero.
+        
+        Args:
+            interpolation_duration: Time to interpolate from current to zero [s]
+        """
+        print("\n=== Finalization Phase ===")
+        print("Interpolating back to zero position...")
+
+        start_positions = {can_id: self.commanded_angles[can_id] for can_id in self.motor_ids}
+        print(f"  Start positions: {start_positions}")
+               
+        # Target is zero for all motors
+        target_positions = {can_id: 0.0 for can_id in self.motor_ids}
+        print(f"  Target positions: {target_positions}")
+        
+        # Interpolate to zero
+        interpolation_start = time.perf_counter()
+        interpolation_rate = 50.0  # Hz for smooth interpolation
+        interpolation_period = 1.0 / interpolation_rate
+        
+        while True:
+            elapsed = time.perf_counter() - interpolation_start
+            alpha = min(1.0, elapsed / interpolation_duration)
+            
+            # Compute interpolated positions
+            interpolated = self._angular_interpolation(start_positions, target_positions, alpha)
+            
+            # Send interpolated commands
+            control_data = {}
+            for can_id in self.motor_ids:
+                if can_id in interpolated:
+                    angle = interpolated[can_id]
+                    self.commanded_angles[can_id] = angle
+                    safe_angle = self._clamp_angle(can_id, angle)
+                    motor_control_params = self._get_control_params(can_id)
+                    control_data[can_id] = ControlData(
+                        angle=safe_angle,
+                        velocity=motor_control_params["velocity"],
+                        effort=motor_control_params["effort"],
+                        stiffness=motor_control_params["stiffness"],
+                        damping=motor_control_params["damping"],
+                    )
+            
+            # Send commands
+            self.feedbacks_to_receive = set(self.motor_ids)
+            self.feedback_received.clear()
+            for can_id, ctrl_data in control_data.items():
+                self.controller.send_kinematics_for_motor(can_id, ctrl_data)
+            
+            # Wait for feedback (with timeout)
+            self.feedback_received.wait(timeout=0.1)
+            
+            # Check if interpolation complete
+            if alpha >= 1.0:
+                break
+            
+            # Rate limit interpolation
+            time.sleep(interpolation_period)
+        
+        # # Verify motors reached zero position
+        # print("Verifying motors reached zero position...")
+        # position_tolerance = self.config.get("position_tolerance", 0.05)  # Default: 0.05 rad ≈ 2.9°
+        # zero_targets = {can_id: 0.0 for can_id in self.motor_ids}
+        # reached = self._check_positions_reached(zero_targets, tolerance=position_tolerance, max_wait_time=3.0)
+        
+        # if reached:
+        #     print("  ✓ All motors reached zero position. Finalization complete!\n")
+        # else:
+        #     print("  ⚠️  Warning: Some motors did not reach zero position.\n")
+
     def run_identification(self) -> None:
         """Main identification loop
         
@@ -790,7 +1126,6 @@ class SystemIdentification:
         - Track and warn if requested rate is unachievable
         - If sample_rate is 0 or not set, run as fast as possible (no rate limiting)
         """
-        control_params = self.config["control_parameters"]
         chirp_config = self.config["chirp"]
         expected_rate = chirp_config["sample_rate"]
         # rate_limit: True (default) = limit to sample_rate, False = run as fast as possible
@@ -818,6 +1153,12 @@ class SystemIdentification:
         print(f"Motors started: {self.motor_ids}")
         time.sleep(1.0)
 
+        # Get interpolation duration from config (default 2.0 seconds)
+        interpolation_duration = self.config.get("interpolation_duration", 2.0)
+        
+        # Initialize: send zero commands and interpolate to initial chirp position
+        self._initialize_to_chirp_start(interpolation_duration=interpolation_duration)
+
         self.start_time = time.perf_counter()
         self.sample_count = 0
         is_complete = False
@@ -840,47 +1181,64 @@ class SystemIdentification:
         last_send_time = None  # Will be set after first iteration
         first_sample_done = False
 
+
         while not is_complete:
+            control_data = {}
             loop_start = time.perf_counter()
 
-            # Generate control data for all motors
-            control_data = {}
-            
+           
             # Process IK groups
             for group_name, ik_gen in self.ik_generators.items():
-                ik_inputs, motor_angles, complete = ik_gen.get_next()
-                
-                if complete:
-                    is_complete = True
-                
-                # Store IK inputs for logging
-                self.commanded_ik_inputs[group_name] = ik_inputs
-                
                 # Get motor IDs for this group
                 group_motor_ids = [
                     mid for mid, (gname, _) in self.motor_to_ik_group.items() 
                     if gname == group_name
                 ]
+                
+                # Only process this IK group if at least one motor is in motor_ids
+                group_motor_ids_in_scope = [mid for mid in group_motor_ids if mid in self.motor_ids]
+                if not group_motor_ids_in_scope:
+                    continue  # Skip IK groups with no motors in motor_ids
+                
                 # Sort by index in group
-                group_motor_ids = sorted(
-                    group_motor_ids, 
+                group_motor_ids_in_scope = sorted(
+                    group_motor_ids_in_scope, 
                     key=lambda mid: self.motor_to_ik_group[mid][1]
                 )
                 
+                ik_inputs, motor_angles, complete = ik_gen.get_next()
+                
+                if complete:
+                    is_complete = True
+                    continue
+                
+                # Store IK inputs for logging
+                self.commanded_ik_inputs[group_name] = ik_inputs
+                
                 # Create control data for each motor in the group
-                for i, motor_id in enumerate(group_motor_ids):
-                    if i < len(motor_angles):
-                        raw_angle = motor_angles[i]
+                for motor_id in group_motor_ids_in_scope:
+                    # Find the index of this motor in the original group order
+                    original_idx = self.motor_to_ik_group[motor_id][1]
+                    if original_idx < len(motor_angles):
+                        # Normal case: use computed motor angle from IK
+                        raw_angle = motor_angles[original_idx]
                         self.commanded_angles[motor_id] = raw_angle
+                    elif complete:
+                        # Signal complete: use last commanded angle (or 0.0 if never commanded)
+                        raw_angle = self.commanded_angles.get(motor_id, 0.0)
+                    else:
+                        # Skip if no data and not complete
+                        continue
 
-                        safe_angle = self._clamp_angle(motor_id, raw_angle)
-                        control_data[motor_id] = ControlData(
-                            angle=safe_angle,
-                            velocity=control_params["velocity"],
-                            effort=control_params["effort"],
-                            stiffness=control_params["stiffness"],
-                            damping=control_params["damping"],
-                        )
+                    safe_angle = self._clamp_angle(motor_id, raw_angle)
+                    motor_control_params = self._get_control_params(motor_id)
+                    control_data[motor_id] = ControlData(
+                        angle=safe_angle,
+                        velocity=motor_control_params["velocity"],
+                        effort=motor_control_params["effort"],
+                        stiffness=motor_control_params["stiffness"],
+                        damping=motor_control_params["damping"],
+                    )
             
             # Process direct motors (not in any IK group)
             # Signal already includes scale/direction/bias transformation
@@ -892,17 +1250,35 @@ class SystemIdentification:
 
                 if complete:
                     is_complete = True
+                    continue
 
                 self.commanded_angles[can_id] = raw_angle
                 safe_angle = self._clamp_angle(can_id, raw_angle)
 
+                motor_control_params = self._get_control_params(can_id)
                 control_data[can_id] = ControlData(
                     angle=safe_angle,
-                    velocity=control_params["velocity"],
-                    effort=control_params["effort"],
-                    stiffness=control_params["stiffness"],
-                    damping=control_params["damping"],
+                    velocity=motor_control_params["velocity"],
+                    effort=motor_control_params["effort"],
+                    stiffness=motor_control_params["stiffness"],
+                    damping=motor_control_params["damping"],
                 )
+
+            # Ensure all motors get a command (use last commanded angle or zero for any missing)
+            # This ensures consistent behavior on the final iteration
+            # for can_id in self.motor_ids:
+            #     if can_id not in control_data:
+            #         # Motor didn't get a command (shouldn't happen, but handle gracefully)
+            #         last_angle = self.commanded_angles.get(can_id, 0.0)
+            #         safe_angle = self._clamp_angle(can_id, last_angle)
+            #         motor_control_params = self._get_control_params(can_id)
+            #         control_data[can_id] = ControlData(
+            #             angle=safe_angle,
+            #             velocity=motor_control_params["velocity"],
+            #             effort=motor_control_params["effort"],
+            #             stiffness=motor_control_params["stiffness"],
+            #             damping=motor_control_params["damping"],
+            #         )
 
             # Send control commands to all motors
             self.feedbacks_to_receive = set(self.motor_ids)
@@ -1009,6 +1385,10 @@ class SystemIdentification:
         avg_loop_time_ms = np.mean(loop_times) * 1000
 
         print("\nIdentification complete!")
+        
+        # Finalize: smoothly interpolate back to zero
+        interpolation_duration = self.config.get("interpolation_duration", 2.0)
+        self._finalize_to_zero(interpolation_duration=interpolation_duration)
         print(f"Motors: {self.motor_ids}")
         if self.ik_generators:
             print(f"IK groups: {list(self.ik_generators.keys())}")
@@ -1084,10 +1464,14 @@ class SystemIdentification:
             for group_name, ik_gen in self.ik_generators.items():
                 group_motor_ids = []
                 for mid, (gname, idx) in self.motor_to_ik_group.items():
-                    if gname == group_name:
+                    if gname == group_name and mid in self.motor_ids:
                         group_motor_ids.append((idx, mid))
                 group_motor_ids.sort()
                 motor_ids_ordered = [mid for _, mid in group_motor_ids]
+                
+                # Skip if no motors in this group are in motor_ids
+                if not motor_ids_ordered:
+                    continue
 
                 if ik_gen.ik_type == "foot" and len(motor_ids_ordered) == 2:
                     lower_data = self.feedback_data.get(motor_ids_ordered[0], [])
@@ -1249,12 +1633,17 @@ class SystemIdentification:
                 if ik_gen.ik_type != "foot": continue
 
                 # Get sorted motors (0: Lower/Pitch, 1: Upper/Roll)
-                group_motor_ids = [mid for mid, (gname, _) in self.motor_to_ik_group.items() if gname == group_name]
+                # Only include motors that are in motor_ids
+                group_motor_ids = [mid for mid, (gname, _) in self.motor_to_ik_group.items() 
+                                 if gname == group_name and mid in self.motor_ids]
                 group_motor_ids.sort(key=lambda m: self.motor_to_ik_group[m][1])
 
                 if len(group_motor_ids) != 2: continue
                 
                 id_pitch, id_roll = group_motor_ids[0], group_motor_ids[1]
+                # These should be in motor_ids, but add safety check
+                if id_pitch not in self.motor_ids or id_roll not in self.motor_ids:
+                    continue
                 idx_pitch = self.motor_ids.index(id_pitch)
                 idx_roll = self.motor_ids.index(id_roll)
 
@@ -1502,9 +1891,9 @@ To add new IK types, use IKRegistry.register() in your code.
             # 1. Save standard JSON (Good for debugging)
             sysid.save_results(str(output_dir / "raw_debug_data.json"))
         
-            # 2. Save Hoku-Style Data (.pt) - The critical file for Sim2Real
-            if args.save_torch:
-                sysid.save_hoku_style_data(output_dir)
+            # # 2. Save Hoku-Style Data (.pt) - The critical file for Sim2Real
+            # if args.save_torch:
+            #     sysid.save_hoku_style_data(output_dir)
 
             # 3. Save Plots
             if args.save_plots:
