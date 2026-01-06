@@ -32,7 +32,7 @@
         4,
         5
     ],
-    "_comment_formula": "All joints use: q(t) = scale * direction * (s(t) + bias), where s(t) is base chirp [-1, +1]",
+    "_comment_formula": "All joints use: q(t) = scale * direction * s(t) + bias, where s(t) is base chirp [-1, +1]",
     "_comment_motors": "Per-motor config for DIRECT control (motors not in ik_groups)",
     "_comment_motor_limits": "Direct motors: scale defines amplitude in radians. Typical safe range: 0.1-0.5 rad. Check motor joint limits before exceeding.",
     "motors": {
