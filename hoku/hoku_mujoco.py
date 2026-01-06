@@ -17,6 +17,18 @@ import mujoco.viewer
 
 import config
 
+# Real-time scheduling utilities (optional)
+_sysid_path = Path(__file__).resolve().parent.parent / "system_identification" / "scripts"
+if _sysid_path.exists() and str(_sysid_path) not in sys.path:
+    sys.path.insert(0, str(_sysid_path))
+try:
+    from realtime import setup_realtime, get_rt_info
+    RT_AVAILABLE = True
+except ImportError:
+    setup_realtime = None
+    get_rt_info = None
+    RT_AVAILABLE = False
+
 # Add humanoid-protocol to path if needed
 _proto_path = Path(__file__).resolve().parent.parent / "humanoid-protocol" / "python"
 if _proto_path.exists() and str(_proto_path) not in sys.path:
@@ -428,21 +440,38 @@ class MujocoUDPServer:
         except KeyboardInterrupt:
             print("\n[Sim] Interrupted")
         finally:
-            self.running = False
-            # Close sockets first to unblock UDP loop
-            self._close_sockets()
-            # Wait for threads
-            if self.physics_thread and self.physics_thread.is_alive():
-                self.physics_thread.join(timeout=0.5)
-            if viewer_thread and viewer_thread.is_alive():
-                viewer_thread.join(timeout=0.5)
-            # Close viewer last
-            if self.viewer:
-                try:
-                    self.viewer.close()
-                except Exception:
-                    pass
-            print("[Sim] Stopped")
+            self._shutdown(viewer_thread)
+
+    def _shutdown(self, viewer_thread: threading.Thread | None) -> None:
+        """Clean shutdown of all resources"""
+        self.running = False
+        
+        # Close sockets first to unblock UDP loop
+        self._close_sockets()
+        
+        # Wait for threads with timeout
+        if self.physics_thread and self.physics_thread.is_alive():
+            self.physics_thread.join(timeout=0.5)
+            if self.physics_thread.is_alive():
+                print("[Sim] Warning: Physics thread did not stop")
+        
+        if viewer_thread and viewer_thread.is_alive():
+            viewer_thread.join(timeout=0.5)
+            if viewer_thread.is_alive():
+                print("[Sim] Warning: Viewer thread did not stop")
+        
+        # Close viewer
+        if self.viewer:
+            try:
+                self.viewer.close()
+            except Exception:
+                pass
+        
+        print("[Sim] Stopped")
+        
+        # Force exit to ensure clean termination
+        import os
+        os._exit(0)
 
 
 def main():
@@ -469,7 +498,47 @@ def main():
         "--no-physics", action="store_true",
         help="Disable physics for max UDP throughput testing"
     )
+    # Real-time scheduling options
+    parser.add_argument(
+        "--realtime", type=int, nargs="?", const=90, default=0,
+        metavar="PRIORITY",
+        help="Enable RT scheduling (SCHED_FIFO, default priority: 90)"
+    )
+    parser.add_argument(
+        "--cpu", type=int, default=None, metavar="CORE",
+        help="Pin to specific CPU core"
+    )
+    parser.add_argument(
+        "--no-memlock", action="store_true",
+        help="Disable memory locking"
+    )
+    parser.add_argument(
+        "--rt-info", action="store_true",
+        help="Show RT config and exit"
+    )
     args = parser.parse_args()
+
+    # Handle --rt-info
+    if args.rt_info:
+        if not RT_AVAILABLE:
+            print("Real-time module not available")
+            return
+        info = get_rt_info()
+        print("Current real-time configuration:")
+        for k, v in info.items():
+            print(f"  {k}: {v}")
+        return
+
+    # Setup real-time scheduling if requested
+    if args.realtime > 0 or args.cpu is not None:
+        if not RT_AVAILABLE:
+            print("[Sim] Warning: RT module not available")
+        else:
+            setup_realtime(
+                priority=args.realtime,
+                cpu=args.cpu,
+                lock_mem=not args.no_memlock and args.realtime > 0,
+            )
 
     server = MujocoUDPServer(
         recv_port=args.recv_port,

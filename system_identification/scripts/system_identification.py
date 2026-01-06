@@ -31,6 +31,17 @@ from pathlib import Path
 
 import numpy as np
 
+# Real-time scheduling utilities
+try:
+    from .realtime import setup_realtime, get_rt_info
+except ImportError:
+    # Handle running directly (python scripts/system_identification.py)
+    try:
+        from realtime import setup_realtime, get_rt_info
+    except ImportError:
+        setup_realtime = None
+        get_rt_info = None
+
 
 def busy_sleep(duration: float) -> None:
     """Accurate sleep using busy-wait. Best for short durations (<50ms)."""
@@ -1472,6 +1483,35 @@ To add new IK types, use IKRegistry.register() in your code.
         action="store_true",
         help="Use MuJoCo simulation instead of real hardware (start sim first)",
     )
+    
+    # Real-time scheduling options
+    parser.add_argument(
+        "--realtime",
+        type=int,
+        nargs="?",
+        const=90,
+        default=0,
+        metavar="PRIORITY",
+        help="Enable real-time scheduling with SCHED_FIFO (default priority: 90). "
+             "Requires root or CAP_SYS_NICE capability.",
+    )
+    parser.add_argument(
+        "--cpu",
+        type=int,
+        default=None,
+        metavar="CORE",
+        help="Pin process to specific CPU core (0-indexed). Useful with isolcpus.",
+    )
+    parser.add_argument(
+        "--no-memlock",
+        action="store_true",
+        help="Disable memory locking (mlockall). Default is to lock memory when --realtime is used.",
+    )
+    parser.add_argument(
+        "--rt-info",
+        action="store_true",
+        help="Show current real-time scheduling info and exit.",
+    )
 
     args = parser.parse_args()
     
@@ -1488,6 +1528,31 @@ To add new IK types, use IKRegistry.register() in your code.
             info = IKRegistry.get(name)
             print(f"  {name}: inputs={info['input_names']}, motors={info['motor_count']}")
         return
+    
+    # Show RT info and exit if requested
+    if args.rt_info:
+        if get_rt_info is None:
+            print("Real-time module not available")
+            return
+        info = get_rt_info()
+        print("Current real-time configuration:")
+        for k, v in info.items():
+            print(f"  {k}: {v}")
+        return
+    
+    # Setup real-time scheduling if requested
+    if args.realtime > 0 or args.cpu is not None:
+        if setup_realtime is None:
+            print("Warning: Real-time module not available. Continuing without RT optimizations.")
+        else:
+            rt_status = setup_realtime(
+                priority=args.realtime,
+                cpu=args.cpu,
+                lock_mem=not args.no_memlock and args.realtime > 0,
+            )
+            if not any(rt_status.values()):
+                print("Warning: No real-time optimizations were applied. Check permissions.")
+                print("  To enable without root: sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' $(which python3)")
 
     # Resolve config path (looks in package config/ folder if not found)
     config_path = resolve_config_path(args.config)
