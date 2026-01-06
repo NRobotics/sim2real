@@ -1,0 +1,13 @@
+{
+    "configuration": "default",
+    "documentId": "86357a6ac14570745ed42c13",
+    "documentMicroversion": "c3f48c628c2d93ea7a2c378c",
+    "elementId": "2968c5f44d5bf1ddc5fd3359",
+    "fullConfiguration": "default",
+    "id": "M55Z9M3TJLEsr/Msr",
+    "isStandardContent": false,
+    "name": "actuator_housing_bearing_axle_male <1>",
+    "partId": "JlH",
+    "suppressed": false,
+    "type": "Part"
+}

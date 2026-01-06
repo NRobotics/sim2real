@@ -46,6 +46,21 @@ from humanoid_messages.can import (
     MotorCANController,
 )
 
+# Optional MuJoCo controller import
+try:
+    from hoku.mujoco_controller import MujocoMotorController
+    MUJOCO_AVAILABLE = True
+except ImportError:
+    # Try adding workspace root to path
+    _ws_root = Path(__file__).resolve().parent.parent.parent
+    if str(_ws_root) not in sys.path:
+        sys.path.insert(0, str(_ws_root))
+    try:
+        from hoku.mujoco_controller import MujocoMotorController
+        MUJOCO_AVAILABLE = True
+    except ImportError:
+        MUJOCO_AVAILABLE = False
+
 # Import kinematics for IK-based control and FK for saving measured foot state
 try:
     from ..kinematics import ik_foot_to_motor, fk_motor_to_foot
@@ -441,9 +456,11 @@ class SystemIdentification:
         config_file: str,
         motor_ids: list[int] | None = None,
         dry_run: bool = False,
+        use_mujoco: bool = False,
     ):
         self.config = self._load_config(config_file)
         self.dry_run = dry_run
+        self.use_mujoco = use_mujoco
 
         # Determine which motor CAN IDs to use
         # Priority: CLI argument > config file > default [0]
@@ -462,6 +479,19 @@ class SystemIdentification:
         if dry_run:
             print("[DRY-RUN] Running without hardware - using mock controller")
             self.controller = MockMotorCANController(**self.config["can_interface"])
+        elif use_mujoco:
+            if not MUJOCO_AVAILABLE:
+                raise ImportError(
+                    "MuJoCo controller not available. "
+                    "Make sure hoku package is installed."
+                )
+            mujoco_cfg = self.config.get("mujoco", {})
+            print("[MUJOCO] Using MuJoCo simulation controller")
+            self.controller = MujocoMotorController(
+                sim_host=mujoco_cfg.get("host", "127.0.0.1"),
+                send_port=mujoco_cfg.get("send_port", 5000),
+                recv_port=mujoco_cfg.get("recv_port", 5001),
+            )
         else:
             self.controller = MotorCANController(**self.config["can_interface"])
 
@@ -839,8 +869,12 @@ class SystemIdentification:
             self.feedbacks_to_receive = set(self.motor_ids)
             self.feedback_received.clear()
 
-            for can_id, ctrl_data in control_data.items():
-                self.controller.send_kinematics_for_motor(can_id, ctrl_data)
+            # Use batched send if available (MuJoCo controller)
+            if hasattr(self.controller, 'send_kinematics_batch'):
+                self.controller.send_kinematics_batch(control_data)
+            else:
+                for can_id, ctrl_data in control_data.items():
+                    self.controller.send_kinematics_for_motor(can_id, ctrl_data)
 
             # BLOCKING wait for all feedback before proceeding
             # This ensures we don't send next command before receiving response
@@ -1433,6 +1467,11 @@ To add new IK types, use IKRegistry.register() in your code.
         action="store_true",
         help="List available IK functions and exit",
     )
+    parser.add_argument(
+        "--mujoco",
+        action="store_true",
+        help="Use MuJoCo simulation instead of real hardware (start sim first)",
+    )
 
     args = parser.parse_args()
     
@@ -1465,7 +1504,12 @@ To add new IK types, use IKRegistry.register() in your code.
         print(f"Motor IDs in config: {motor_ids}")
         return
 
-    sysid = SystemIdentification(str(config_path), motor_ids=args.motors, dry_run=args.dry_run)
+    sysid = SystemIdentification(
+        str(config_path),
+        motor_ids=args.motors,
+        dry_run=args.dry_run,
+        use_mujoco=args.mujoco,
+    )
 
     try:
         sysid.setup()

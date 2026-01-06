@@ -5,6 +5,11 @@
         "bitrate": 1000000,
         "fd": true
     },
+    "mujoco": {
+        "host": "127.0.0.1",
+        "send_port": 5000,
+        "recv_port": 5001
+    },
     "chirp": {
         "f_start": 0.1,
         "f_end": 0.5,

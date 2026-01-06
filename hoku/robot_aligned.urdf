@@ -1,0 +1,516 @@
+<robot name="v_0_0_2">
+  
+  <link name="hip_center">
+    <inertial>
+      <origin xyz="-7.04399e-08 0.018822 0.932168" rpy="0 0 0" />
+      <mass value="2.41978" />
+      <inertia ixx="0.0051175" ixy="-2.50285e-09" ixz="1.49441e-08" iyy="0.00592554" iyz="0.00112097" izz="0.00424419" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="5.65553e-17 0.0155 0.925374" rpy="1.57079 -1.57079 3.14159" />
+      <geometry>
+        <cylinder length="0.135" radius="0.06" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-7.04399e-08 0.018822 0.932168" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://assets/merged/hip_center_visual.stl" />
+      </geometry>
+      <material name="hip_center_parts_material">
+        <color rgba="0.643673 0.643673 0.643673 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="IMU_hip">
+    <origin xyz="0 0 0" rpy="0 -0 0" />
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-9" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <joint name="IMU_hip_frame" type="fixed">
+    <origin xyz="7.64501e-17 0.0774805 0.906827" rpy="0 0 0" />
+    <parent link="hip_center" />
+    <child link="IMU_hip" />
+    <axis xyz="0 0 0" />
+  </joint>
+  
+  <link name="hip_pitch_left">
+    <inertial>
+      <origin xyz="0.0248877 0.00149283 -0.0221929" rpy="0 0 0" />
+      <mass value="0.151784" />
+      <inertia ixx="0.000205657" ixy="-4.23796e-06" ixz="3.64545e-05" iyy="0.000169365" iyz="7.07714e-06" izz="0.000151348" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="0.045628 1.67601e-07 -0.054743" rpy="-1.57079 -0.7854 -1.28107e-06" />
+      <geometry>
+        <cylinder length="0.0675" radius="0.045" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.0248877 0.00149283 -0.0221929" rpy="6.04586e-07 -2.65359e-06 1.97711e-06" />
+      <geometry>
+        <mesh filename="package://assets/merged/hip_pitch_left_visual.stl" />
+      </geometry>
+      <material name="hip_pitch_left_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="hip_roll_left">
+    <inertial>
+      <origin xyz="-0.0077006 0.000958423 -0.0350135" rpy="0 0 0" />
+      <mass value="1.62316" />
+      <inertia ixx="0.00299467" ixy="-1.51385e-05" ixz="-0.000384838" iyy="0.00337161" iyz="-5.45371e-05" izz="0.00137254" />
+    </inertial>
+    
+    <visual>
+      <origin xyz="-0.0077006 0.000958423 -0.0350135" rpy="-1.07586e-06 -2.65359e-06 5.62299e-08" />
+      <geometry>
+        <mesh filename="package://assets/merged/hip_roll_left_visual.stl" />
+      </geometry>
+      <material name="hip_roll_left_parts_material">
+        <color rgba="0.643463 0.645296 0.646395 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="femur_left">
+    <inertial>
+      <origin xyz="-0.00635391 0.00535361 -0.140382" rpy="0 0 0" />
+      <mass value="0.33394" />
+      <inertia ixx="0.00240469" ixy="3.52754e-06" ixz="-8.72066e-05" iyy="0.00248624" iyz="8.45987e-05" izz="0.000287477" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="-3.03e-07 -1.62994e-07 -0.1515" rpy="1.07586e-06 -2e-06 -3.14159" />
+      <geometry>
+        <cylinder length="0.3" radius="0.055" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.00635391 0.00535361 -0.140382" rpy="-1.07585e-06 2e-06 5.30718e-06" />
+      <geometry>
+        <mesh filename="package://assets/merged/femur_left_visual.stl" />
+      </geometry>
+      <material name="femur_left_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="tibia_left">
+    <inertial>
+      <origin xyz="-0.00116277 0.0167561 -0.121244" rpy="0 0 0" />
+      <mass value="1.83996" />
+      <inertia ixx="0.0324465" ixy="-2.81783e-05" ixz="0.000204296" iyy="0.031907" iyz="0.00307994" izz="0.00130397" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="-4.02071e-05 0.0341895 -0.259872" rpy="0.0390753 3.6732e-06 -3.95182e-12" />
+      <geometry>
+        <cylinder length="0.35" radius="0.04" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.00116277 0.0167561 -0.121244" rpy="-4.74909e-06 3.6732e-06 -3.95183e-12" />
+      <geometry>
+        <mesh filename="package://assets/merged/tibia_left_visual.stl" />
+      </geometry>
+      <material name="tibia_left_parts_material">
+        <color rgba="0.640933 0.640933 0.640933 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="foot_pivot">
+    <inertial>
+      <origin xyz="-2.89028e-06 1.58264e-08 -0.0100428" rpy="0 0 0" />
+      <mass value="0.016949" />
+      <inertia ixx="3.05768e-06" ixy="4.68126e-12" ixz="4.81728e-10" iyy="2.31765e-06" iyz="5.37958e-13" izz="1.97861e-06" />
+    </inertial>
+    
+    <visual>
+      <origin xyz="-2.89028e-06 1.58264e-08 -0.0100428" rpy="5.25094e-06 3.6732e-06 1e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/foot_pivot_visual.stl" />
+      </geometry>
+      <material name="foot_pivot_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="foot_left">
+    <inertial>
+      <origin xyz="0.00188519 -0.0454153 -0.0076284" rpy="0 0 0" />
+      <mass value="0.331204" />
+      <inertia ixx="0.0010594" ixy="4.76786e-06" ixz="-1.89734e-07" iyy="0.000161921" iyz="-6.43569e-05" izz="0.00113496" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="-0.00611141 -0.0665 -0.0175002" rpy="1.57079 -6.32679e-06 -3.14158" />
+      <geometry>
+        <cylinder length="0.225" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.00988859 -0.0664998 -0.0175003" rpy="1.57079 -6.32679e-06 -3.14158" />
+      <geometry>
+        <cylinder length="0.225" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.0258888 -0.0814997 -0.0175004" rpy="1.57079 -6.32679e-06 -3.14158" />
+      <geometry>
+        <cylinder length="0.125" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.0221113 -0.0765002 -0.0175002" rpy="1.57079 -6.32679e-06 -3.14158" />
+      <geometry>
+        <cylinder length="0.165" radius="0.0075" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.00188519 -0.0454153 -0.0076284" rpy="1.41161e-16 3.6732e-06 1e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/foot_left_visual.stl" />
+      </geometry>
+      <material name="foot_left_parts_material">
+        <color rgba="0.642682 0.642682 0.642682 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <joint name="ankle_roll_left" type="revolute">
+    <origin xyz="-6.61179e-08 2.83985e-08 -0.018" rpy="0 0 0" />
+    <parent link="foot_pivot" />
+    <child link="foot_left" />
+    <axis xyz="9.99999e-06 -1 -3.67321e-06" />
+    <limit effort="20" velocity="100" lower="-0.349066" upper="0.349066" />
+  </joint>
+  
+  <joint name="ankle_pitch_left" type="revolute">
+    <origin xyz="9.35242e-05 0.0446765 -0.455164" rpy="0 0 0" />
+    <parent link="tibia_left" />
+    <child link="foot_pivot" />
+    <axis xyz="1 6.3268e-06 -3.67321e-06" />
+    <limit effort="20" velocity="100" lower="-0.27091" upper="0.427222" />
+  </joint>
+  
+  <joint name="knee_pitch_left" type="revolute">
+    <origin xyz="-0.0120855 0.00890989 -0.255086" rpy="0 0 0" />
+    <parent link="femur_left" />
+    <child link="tibia_left" />
+    <axis xyz="1 3.6732e-06 -3.67321e-06" />
+    <limit effort="100" velocity="100" lower="-0.0872665" upper="1.5708" />
+  </joint>
+  
+  <joint name="hip_yaw_left" type="revolute">
+    <origin xyz="-0.0137501 2.35975e-07 -0.09115" rpy="0 0 0" />
+    <parent link="hip_roll_left" />
+    <child link="femur_left" />
+    <axis xyz="2e-06 1.07587e-06 1" />
+    <limit effort="100" velocity="100" lower="-0.349066" upper="0.349066" />
+  </joint>
+  
+  <joint name="hip_roll_left" type="revolute">
+    <origin xyz="0.043854 -0.000999839 -0.0538195" rpy="0 0 0" />
+    <parent link="hip_pitch_left" />
+    <child link="hip_roll_left" />
+    <axis xyz="5.62368e-08 -1 -2.59734e-06" />
+    <limit effort="100" velocity="100" lower="-0.523599" upper="1.309" />
+  </joint>
+  
+  <joint name="hip_pitch_left" type="revolute">
+    <origin xyz="0.0521638 0.0299998 0.89822" rpy="0 0 0" />
+    <parent link="hip_center" />
+    <child link="hip_pitch_left" />
+    <axis xyz="0.887012 3.25818e-06 -0.461747" />
+    <limit effort="100" velocity="100" lower="-1.5708" upper="1.22173" />
+  </joint>
+  
+  <link name="hip_pitch_right">
+    <inertial>
+      <origin xyz="-0.0248877 0.00149261 -0.022193" rpy="0 0 0" />
+      <mass value="0.151784" />
+      <inertia ixx="0.000205656" ixy="4.23816e-06" ixz="-3.64548e-05" iyy="0.000169364" iyz="7.07694e-06" izz="0.000151348" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="-0.0456279 -1.676e-07 -0.0547431" rpy="1.5708 0.785397 -1.28106e-06" />
+      <geometry>
+        <cylinder length="0.0675" radius="0.045" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0248877 0.00149261 -0.022193" rpy="-3.25817e-06 -2.7629e-12 1.97711e-06" />
+      <geometry>
+        <mesh filename="package://assets/merged/hip_pitch_right_visual.stl" />
+      </geometry>
+      <material name="hip_pitch_right_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="hip_roll_right">
+    <inertial>
+      <origin xyz="0.00770056 0.0010585 -0.0350135" rpy="0 0 0" />
+      <mass value="1.62316" />
+      <inertia ixx="0.00299467" ixy="1.51347e-05" ixz="0.000384837" iyy="0.00337161" iyz="-5.45333e-05" izz="0.00137253" />
+    </inertial>
+    
+    <visual>
+      <origin xyz="0.00770056 0.0010585 -0.0350135" rpy="-1.07585e-06 -5.65359e-06 1.00562e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/hip_roll_right_visual.stl" />
+      </geometry>
+      <material name="hip_roll_right_parts_material">
+        <color rgba="0.643463 0.645296 0.646395 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="femur_right">
+    <inertial>
+      <origin xyz="0.00635446 0.00535371 -0.140382" rpy="0 0 0" />
+      <mass value="0.333939" />
+      <inertia ixx="0.00240469" ixy="-3.52798e-06" ixz="8.72107e-05" iyy="0.00248624" iyz="8.45996e-05" izz="0.000287478" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="8.56521e-07 -1.62983e-07 -0.1515" rpy="-1.07585e-06 -5.65359e-06 1.00562e-05" />
+      <geometry>
+        <cylinder length="0.3" radius="0.055" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.00635446 0.00535371 -0.140382" rpy="-1.07585e-06 -5.65359e-06 1.00562e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/femur_right_visual.stl" />
+      </geometry>
+      <material name="femur_right_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="tibia_right">
+    <inertial>
+      <origin xyz="0.0011628 0.0167561 -0.121244" rpy="0 0 0" />
+      <mass value="1.83996" />
+      <inertia ixx="0.0324464" ixy="2.81795e-05" ixz="-0.000204268" iyy="0.031907" iyz="0.00307992" izz="0.00130397" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="4.03037e-05 0.0341895 -0.259872" rpy="-0.0390726 6.32679e-06 -3.14158" />
+      <geometry>
+        <cylinder length="0.35" radius="0.04" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.0011628 0.0167561 -0.121244" rpy="-4.74905e-06 -6.3268e-06 1e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/tibia_right_visual.stl" />
+      </geometry>
+      <material name="tibia_right_parts_material">
+        <color rgba="0.640933 0.640933 0.640933 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="foot_pivot_2">
+    <inertial>
+      <origin xyz="2.91693e-06 -1.07649e-08 -0.0100428" rpy="0 0 0" />
+      <mass value="0.016949" />
+      <inertia ixx="3.05768e-06" ixy="1.01181e-11" ixz="-4.78865e-10" iyy="2.31765e-06" iyz="-3.71311e-13" izz="1.97861e-06" />
+    </inertial>
+    
+    <visual>
+      <origin xyz="2.91693e-06 -1.07649e-08 -0.0100428" rpy="-4.74905e-06 -6.3268e-06 1e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/foot_pivot_2_visual.stl" />
+      </geometry>
+      <material name="foot_pivot_2_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="foot_right">
+    <inertial>
+      <origin xyz="-0.00188321 -0.0454229 -0.00762789" rpy="0 0 0" />
+      <mass value="0.331229" />
+      <inertia ixx="0.00105968" ixy="-4.7158e-06" ixz="1.93941e-07" iyy="0.000161927" iyz="-6.4356e-05" izz="0.00113524" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="0.0221131 -0.0764998 -0.0174994" rpy="-1.57081 -3.6732e-06 1.26536e-05" />
+      <geometry>
+        <cylinder length="0.165" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.00988704 -0.0665002 -0.0174996" rpy="-1.57081 -3.6732e-06 1.26536e-05" />
+      <geometry>
+        <cylinder length="0.225" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.00611296 -0.0665 -0.0174995" rpy="-1.57081 -3.6732e-06 1.26536e-05" />
+      <geometry>
+        <cylinder length="0.225" radius="0.0075" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.0258869 -0.0815004 -0.0174996" rpy="-1.57081 -3.6732e-06 1.26536e-05" />
+      <geometry>
+        <cylinder length="0.125" radius="0.0075" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.00188321 -0.0454229 -0.00762789" rpy="-1e-05 -8.98038e-06 1.26536e-05" />
+      <geometry>
+        <mesh filename="package://assets/merged/foot_right_visual.stl" />
+      </geometry>
+      <material name="foot_right_parts_material">
+        <color rgba="0.642681 0.642681 0.642681 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <joint name="ankle_roll_right" type="revolute">
+    <origin xyz="1.13883e-07 -1.93641e-08 -0.018" rpy="0 0 0" />
+    <parent link="foot_pivot_2" />
+    <child link="foot_right" />
+    <axis xyz="1.26535e-05 -1 6.32679e-06" />
+    <limit effort="20" velocity="100" lower="-0.349066" upper="0.349066" />
+  </joint>
+  
+  <joint name="ankle_pitch_right" type="revolute">
+    <origin xyz="-9.30913e-05 0.0446765 -0.455164" rpy="0 0 0" />
+    <parent link="tibia_right" />
+    <child link="foot_pivot_2" />
+    <axis xyz="1 1.36732e-05 6.32679e-06" />
+    <limit effort="20" velocity="100" lower="-0.27091" upper="0.427222" />
+  </joint>
+  
+  <joint name="knee_pitch_right" type="revolute">
+    <origin xyz="0.0120864 0.00891005 -0.255086" rpy="0 0 0" />
+    <parent link="femur_right" />
+    <child link="tibia_right" />
+    <axis xyz="1 1.36732e-05 6.32679e-06" />
+    <limit effort="100" velocity="100" lower="-0.0872665" upper="1.5708" />
+  </joint>
+  
+  <joint name="hip_yaw_right" type="revolute">
+    <origin xyz="0.0137501 0.000100375 -0.09115" rpy="0 0 0" />
+    <parent link="hip_roll_right" />
+    <child link="femur_right" />
+    <axis xyz="-5.6536e-06 1.07579e-06 1" />
+    <limit effort="100" velocity="100" lower="-0.349066" upper="0.349066" />
+  </joint>
+  
+  <joint name="hip_roll_right" type="revolute">
+    <origin xyz="-0.0438538 -0.00100016 -0.0538196" rpy="0 0 0" />
+    <parent link="hip_pitch_right" />
+    <child link="hip_roll_right" />
+    <axis xyz="1.00562e-05 -1 -2.59735e-06" />
+    <limit effort="100" velocity="100" lower="-1.309" upper="0.523599" />
+  </joint>
+  
+  <joint name="hip_pitch_right" type="revolute">
+    <origin xyz="-0.0517203 0.0299998 0.89845" rpy="0 0 0" />
+    <parent link="hip_center" />
+    <child link="hip_pitch_right" />
+    <axis xyz="0.88701 3.25817e-06 0.461749" />
+    <limit effort="100" velocity="100" lower="-1.5708" upper="1.22173" />
+  </joint>
+  
+  <link name="torso_yaw">
+    <inertial>
+      <origin xyz="-1.2153e-07 -0.00166599 0.0325647" rpy="0 0 0" />
+      <mass value="0.136197" />
+      <inertia ixx="0.00018463" ixy="-6.7143e-11" ixz="9.09516e-11" iyy="0.000140273" iyz="6.96287e-06" izz="0.00013179" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="-9.6856e-08 3.5429e-13 0.0365" rpy="-0.625614 -1.57079 2.19641" />
+      <geometry>
+        <cylinder length="0.0675" radius="0.035" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-1.2153e-07 -0.00166599 0.0325647" rpy="-2.6536e-06 -2.65359e-06 1.28749e-17" />
+      <geometry>
+        <mesh filename="package://assets/merged/torso_yaw_visual.stl" />
+      </geometry>
+      <material name="torso_yaw_parts_material">
+        <color rgba="0.627451 0.627451 0.627451 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="torso_roll">
+    <inertial>
+      <origin xyz="0.000625673 0.0189518 0.12022" rpy="0 0 0" />
+      <mass value="3.57874" />
+      <inertia ixx="0.0257031" ixy="-1.36115e-05" ixz="-8.60571e-05" iyy="0.0249782" iyz="-0.00346119" izz="0.0049482" />
+    </inertial>
+    
+    <collision>
+      <origin xyz="0.000499549 0.030709 0.200484" rpy="2.8798 -5.30718e-06 -2.65361e-06" />
+      <geometry>
+        <cylinder length="0.3" radius="0.0789863" />
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.000625673 0.0189518 0.12022" rpy="1e-05 -2.06501e-13 -2.65357e-06" />
+      <geometry>
+        <mesh filename="package://assets/merged/torso_roll_visual.stl" />
+      </geometry>
+      <material name="torso_roll_parts_material">
+        <color rgba="0.624995 0.726863 0.787984 1" />
+      </material>
+    </visual>
+  </link>
+  
+  <link name="IMU_torso">
+    <origin xyz="0 0 0" rpy="0 -0 0" />
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-9" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <joint name="IMU_torso_frame" type="fixed">
+    <origin xyz="0.000499822 0.0851395 0.152035" rpy="0 0 0" />
+    <parent link="torso_roll" />
+    <child link="IMU_torso" />
+    <axis xyz="0 0 0" />
+  </joint>
+  
+  <joint name="torso_roll" type="revolute">
+    <origin xyz="-1.69166e-07 6.18791e-13 0.06375" rpy="0 0 0" />
+    <parent link="torso_yaw" />
+    <child link="torso_roll" />
+    <axis xyz="2.65357e-06 1 6.32679e-06" />
+    <limit effort="100" velocity="100" lower="-0.698132" upper="0.698132" />
+  </joint>
+  
+  <joint name="torso_yaw" type="revolute">
+    <origin xyz="-3.76186e-15 1.28399e-13 0.999371" rpy="0 0 0" />
+    <parent link="hip_center" />
+    <child link="torso_yaw" />
+    <axis xyz="2.65359e-06 -9.70655e-12 -1" />
+    <limit effort="100" velocity="100" lower="-0.523599" upper="0.523599" />
+  </joint>
+</robot>

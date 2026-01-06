@@ -1,0 +1,283 @@
+<mujoco model="v_0_0_2">
+  <compiler angle="radian" meshdir="assets" autolimits="true" />
+  <default>
+    <default class="v_0_0_2">
+      <joint frictionloss="0.1" armature="0.005" />
+      <position kp="50" dampratio="1" />
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2" />
+      </default>
+      <default class="collision">
+        <geom group="3" />
+      </default>
+    </default>
+  </default>
+  <worldbody>
+    
+    <body name="hip_center" pos="0 0 0.2" quat="1 0 0 0" childclass="v_0_0_2">
+      <inertial pos="-7.04399e-08 0.018822 0.932168" mass="2.41978" fullinertia="0.0051175 0.00592554 0.00424419 -2.50285e-09 1.49441e-08 0.00112097" />
+      
+      <geom class="collision" pos="5.65553e-17 0.0155 0.925374" quat="0.5 -0.5 -0.5 -0.5" type="cylinder" size="0.06 0.0675" />
+      <geom type="mesh" class="visual" pos="-7.04399e-08 0.018822 0.932168" quat="1 0 0 0" mesh="hip_center_visual" material="hip_center_visual_material" />
+      
+      <site group="3" name="IMU_hip" pos="7.64501e-17 0.0774805 0.906827" quat="7.32402e-15 -0.707107 7.21645e-15 -0.707107" />
+      
+      <body name="hip_pitch_left" pos="0.0521638 0.0299998 0.89822" quat="1 0 0 0">
+        
+        <joint axis="-0.887011 0 0.461749" name="hip_pitch_left" type="hinge" range="-1.5707963267948948 1.2217304763960324" />
+        <inertial pos="0.0248877 0.00149274 -0.0221929" mass="0.151784" fullinertia="0.000205657 0.000169365 0.000151348 -4.23807e-06 3.64544e-05 7.07701e-06" />
+        
+        <geom class="collision" pos="0.0456279 -3.2177e-15 -0.0547431" quat="-0.653281 0.653281 0.270598 0.270598" type="cylinder" size="0.045 0.03375" />
+        <geom type="mesh" class="visual" pos="0.0248877 0.00149274 -0.0221929" quat="1 0 0 0" mesh="hip_pitch_left_visual" material="hip_pitch_left_visual_material" />
+        
+        <body name="hip_roll_left" pos="0.0438539 -0.001 -0.0538196" quat="1 0 0 0">
+          
+          <joint axis="0 -1 4.16334e-17" name="hip_roll_left" type="hinge" range="-0.5235987755982899 1.308996938995756" />
+          <inertial pos="-0.00770051 0.000958332 -0.0350135" mass="1.62316" fullinertia="0.00299468 0.00337161 0.00137253 -1.51393e-05 -0.000384834 -5.45423e-05" />
+          
+          <geom type="mesh" class="visual" pos="-0.00770051 0.000958332 -0.0350135" quat="1 0 -5.41196e-07 0" mesh="hip_roll_left_visual" material="hip_roll_left_visual_material" />
+          
+          <body name="femur_left" pos="-0.0137499 1.78574e-15 -0.09115" quat="1 0 0 0">
+            
+            <joint axis="-1.08239e-06 0 1" name="hip_yaw_left" type="hinge" range="-0.34906585039889787 0.3490658503988339" />
+            <inertial pos="-0.00635347 0.00535378 -0.140382" mass="0.33394" fullinertia="0.00240469 0.00248624 0.000287477 3.52759e-06 -8.71998e-05 8.46013e-05" />
+            
+            <geom class="collision" pos="1.63982e-07 -3.46945e-17 -0.1515" quat="1.14384e-16 -5.41196e-07 -5.33932e-17 1" type="cylinder" size="0.055 0.15" />
+            <geom type="mesh" class="visual" pos="-0.00635347 0.00535378 -0.140382" quat="1 8.32626e-15 -5.41196e-07 7.55138e-13" mesh="femur_left_visual" material="femur_left_visual_material" />
+            
+            <body name="tibia_left" pos="-0.0120847 0.0089102 -0.255086" quat="1 0 0 0">
+              
+              <joint axis="1 0 0" name="knee_pitch_left" type="hinge" range="-0.08726646259938785 1.5707963267952252" />
+              <inertial pos="-0.00116226 0.0167562 -0.121244" mass="1.83996" fullinertia="0.0324465 0.031907 0.00130398 -2.81918e-05 0.000204422 0.00307997" />
+              
+              <geom class="collision" pos="-3.9127e-05 0.0341898 -0.259872" quat="0.999809 0.019537 0 0" type="cylinder" size="0.04 0.175" />
+              <geom type="mesh" class="visual" pos="-0.00116226 0.0167562 -0.121244" quat="1 0 0 0" mesh="tibia_left_visual" material="tibia_left_visual_material" />
+              
+              <body name="foot_pivot" pos="9.53602e-05 0.044677 -0.455164" quat="1 0 0 0">
+                
+                <joint axis="1 0 0" name="ankle_pitch_left" type="hinge" range="-0.27091000649467034 0.42722169430306145" />
+                <inertial pos="-2.85339e-06 5.49728e-18 -0.0100428" mass="0.016949" fullinertia="3.05768e-06 2.31765e-06 1.97861e-06 -4.40111e-24 4.85692e-10 2.87084e-22" />
+                
+                <geom type="mesh" class="visual" pos="-2.85339e-06 0 -0.0100428" quat="1 0 0 0" mesh="foot_pivot_visual" material="foot_pivot_visual_material" />
+                
+                <body name="foot_left" pos="0 -2.77556e-17 -0.018" quat="1 0 0 0">
+                  
+                  <joint axis="9.05096e-18 1 0" name="ankle_roll_left" type="hinge" range="-0.3490658503988224 0.3490658503989094" />
+                  <inertial pos="0.00188476 -0.0454153 -0.00762823" mass="0.331204" fullinertia="0.0010594 0.00016192 0.00113496 4.75912e-06 -1.90673e-07 -6.43533e-05" />
+                  
+                  <geom class="collision" pos="-0.00611201 -0.0665 -0.0175" quat="-1.53702e-14 1.53766e-14 0.707107 0.707107" type="cylinder" size="0.0075 0.1125" />
+                  <geom class="collision" pos="0.00988799 -0.0665 -0.0175" quat="-1.53702e-14 1.53766e-14 0.707107 0.707107" type="cylinder" size="0.0075 0.1125" />
+                  <geom class="collision" pos="0.025888 -0.0815 -0.0175" quat="-1.53702e-14 1.53766e-14 0.707107 0.707107" type="cylinder" size="0.0075 0.0625" />
+                  <geom class="collision" pos="-0.022112 -0.0765 -0.0175" quat="-1.53702e-14 1.53766e-14 0.707107 0.707107" type="cylinder" size="0.0075 0.0825" />
+                  <geom type="mesh" class="visual" pos="0.00188476 -0.0454153 -0.00762823" quat="1 1.64155e-26 2.25424e-14 7.55036e-13" mesh="foot_left_visual" material="foot_left_visual_material" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      
+      <body name="hip_pitch_right" pos="-0.0517203 0.0299998 0.89845" quat="1 0 0 0">
+        
+        <joint axis="-0.887011 0 -0.461749" name="hip_pitch_right" type="hinge" range="-1.5707963267947669 1.2217304763961603" />
+        <inertial pos="-0.0248877 0.0014927 -0.022193" mass="0.151784" fullinertia="0.000205656 0.000169364 0.000151348 4.23803e-06 -3.64548e-05 7.07707e-06" />
+        
+        <geom class="collision" pos="-0.0456279 3.60931e-15 -0.0547431" quat="0.653281 0.653281 0.270598 -0.270598" type="cylinder" size="0.045 0.03375" />
+        <geom type="mesh" class="visual" pos="-0.0248877 0.0014927 -0.022193" quat="1 0 0 0" mesh="hip_pitch_right_visual" material="hip_pitch_right_visual_material" />
+        
+        <body name="hip_roll_right" pos="-0.0438539 -0.001 -0.0538196" quat="1 0 0 0">
+          
+          <joint axis="0 -1 -2.77556e-17" name="hip_roll_right" type="hinge" range="-1.3089969389956726 0.5235987755983734" />
+          <inertial pos="0.00770052 0.00105833 -0.0350135" mass="1.62316" fullinertia="0.00299468 0.00337161 0.00137253 1.51394e-05 0.000384834 -5.45424e-05" />
+          
+          <geom type="mesh" class="visual" pos="0.00770052 0.00105833 -0.0350135" quat="1 0 0 0" mesh="hip_roll_right_visual" material="hip_roll_right_visual_material" />
+          
+          <body name="femur_right" pos="0.0137499 0.0001 -0.09115" quat="1 0 0 0">
+            
+            <joint axis="0 0 1" name="hip_yaw_right" type="hinge" range="-0.34906585039871313 0.34906585039901866" />
+            <inertial pos="0.00635372 0.0053538 -0.140382" mass="0.333939" fullinertia="0.00240469 0.00248624 0.000287477 -3.52678e-06 8.71996e-05 8.46011e-05" />
+            
+            <geom class="collision" pos="-1.20294e-14 -3.02276e-15 -0.1515" quat="1 -1.09218e-14 3.87468e-14 3.25157e-15" type="cylinder" size="0.055 0.15" />
+            <geom type="mesh" class="visual" pos="0.00635372 0.0053538 -0.140382" quat="1 -4.92795e-14 -6.86118e-14 -9.1336e-13" mesh="femur_right_visual" material="femur_right_visual_material" />
+            
+            <body name="tibia_right" pos="0.012085 0.0089102 -0.255086" quat="1 0 0 0">
+              
+              <joint axis="1 0 0" name="knee_pitch_right" type="hinge" range="-0.08726646259938785 1.5707963267952252" />
+              <inertial pos="0.00116226 0.0167562 -0.121244" mass="1.83996" fullinertia="0.0324464 0.031907 0.00130398 2.81918e-05 -0.000204423 0.00307996" />
+              
+              <geom class="collision" pos="3.9127e-05 0.0341898 -0.259872" quat="0 0 -0.019537 0.999809" type="cylinder" size="0.04 0.175" />
+              <geom type="mesh" class="visual" pos="0.00116226 0.0167562 -0.121244" quat="1 0 0 0" mesh="tibia_right_visual" material="tibia_right_visual_material" />
+              
+              <body name="foot_pivot_2" pos="-9.53602e-05 0.044677 -0.455164" quat="1 0 0 0">
+                
+                <joint axis="-1 0 0" name="ankle_pitch_right" type="hinge" range="-0.27091000649455094 0.42722169430318085" />
+                <inertial pos="2.85339e-06 4.19792e-18 -0.0100428" mass="0.016949" fullinertia="3.05768e-06 2.31765e-06 1.97861e-06 -1.73023e-22 -4.85692e-10 9.16155e-23" />
+                
+                <geom type="mesh" class="visual" pos="2.85339e-06 0 -0.0100428" quat="1 0 0 0" mesh="foot_pivot_2_visual" material="foot_pivot_2_visual_material" />
+                
+                <body name="foot_right" pos="1.38778e-17 0 -0.018" quat="1 0 0 0">
+                  
+                  <joint axis="0 1 -5.14381e-27" name="ankle_roll_right" type="hinge" range="-0.3490658503990684 0.3490658503986634" />
+                  <inertial pos="-0.00188383 -0.0454228 -0.00762817" mass="0.331229" fullinertia="0.00105968 0.000161928 0.00113524 -4.72757e-06 1.93575e-07 -6.43621e-05" />
+                  
+                  <geom class="collision" pos="0.022112 -0.0765 -0.0175" quat="-0.707107 0.707107 7.17204e-14 7.17204e-14" type="cylinder" size="0.0075 0.0825" />
+                  <geom class="collision" pos="-0.00988799 -0.0665 -0.0175" quat="-0.707107 0.707107 7.17204e-14 7.17204e-14" type="cylinder" size="0.0075 0.1125" />
+                  <geom class="collision" pos="0.00611201 -0.0665 -0.0175" quat="-0.707107 0.707107 7.17204e-14 7.17204e-14" type="cylinder" size="0.0075 0.1125" />
+                  <geom class="collision" pos="-0.025888 -0.0815 -0.0175" quat="-0.707107 0.707107 7.17204e-14 7.17204e-14" type="cylinder" size="0.0075 0.0625" />
+                  <geom type="mesh" class="visual" pos="-0.00188383 -0.0454228 -0.00762817" quat="1 9.35667e-26 -1.12242e-13 -9.22495e-13" mesh="foot_right_visual" material="foot_right_visual_material" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      
+      <body name="torso_yaw" pos="-3.76186e-15 1.28399e-13 0.999371" quat="1 0 0 0">
+        
+        <joint axis="2.05358e-15 4.06591e-14 -1" name="torso_yaw" type="hinge" range="-0.5235987755983095 0.5235987755982882" />
+        <inertial pos="-2.89974e-08 -0.00166599 0.0325647" mass="0.136197" fullinertia="0.00018463 0.000140273 0.00013179 1.14266e-10 -7.48401e-11 6.96287e-06" />
+        
+        <geom class="collision" pos="-7.08161e-17 -1.48319e-15 0.0365" quat="-0.5 -0.5 0.5 -0.5" type="cylinder" size="0.035 0.03375" />
+        <geom type="mesh" class="visual" pos="-2.89974e-08 -0.00166599 0.0325647" quat="1 0 0 0" mesh="torso_yaw_visual" material="torso_yaw_visual_material" />
+        
+        <body name="torso_roll" pos="-1.26776e-16 -2.59347e-15 0.06375" quat="1 0 0 0">
+          
+          <joint axis="4.70084e-18 1 5.2558e-31" name="torso_roll" type="hinge" range="-0.6981317007977185 0.6981317007977451" />
+          <inertial pos="0.000625942 0.0189526 0.12022" mass="3.57874" fullinertia="0.0257031 0.0249782 0.00494824 -1.36193e-05 -8.61029e-05 -0.00346132" />
+          
+          <geom class="collision" pos="0.0005 0.0307103 0.200484" quat="0.130526 0.991445 6.85258e-16 1.13449e-15" type="cylinder" size="0.0789863 0.15" />
+          <geom type="mesh" class="visual" pos="0.000625942 0.0189526 0.12022" quat="-1 -3.1255e-29 -6.26396e-15 3.05406e-14" mesh="torso_roll_visual" material="torso_roll_visual_material" />
+          
+          <site group="3" name="IMU_torso" pos="0.0005 0.0851405 0.152034" quat="-0.608762 0.793353 1.15789e-15 3.39181e-16" />
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <asset>
+    <mesh file="merged/foot_right_visual.stl" />
+    <mesh file="merged/hip_center_visual.stl" />
+    <mesh file="merged/hip_roll_left_visual.stl" />
+    <mesh file="merged/hip_pitch_right_visual.stl" />
+    <mesh file="merged/femur_right_visual.stl" />
+    <mesh file="merged/foot_pivot_2_visual.stl" />
+    <mesh file="merged/foot_pivot_visual.stl" />
+    <mesh file="merged/torso_roll_visual.stl" />
+    <mesh file="merged/torso_yaw_visual.stl" />
+    <mesh file="merged/femur_left_visual.stl" />
+    <mesh file="merged/foot_left_visual.stl" />
+    <mesh file="merged/hip_pitch_left_visual.stl" />
+    <mesh file="merged/hip_roll_right_visual.stl" />
+    <mesh file="merged/tibia_right_visual.stl" />
+    <mesh file="merged/tibia_left_visual.stl" />
+    <material name="hip_center_visual_material" rgba="0.643673 0.643673 0.643673 1" />
+    <material name="hip_pitch_left_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="hip_roll_left_visual_material" rgba="0.643463 0.645296 0.646395 1" />
+    <material name="femur_left_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="tibia_left_visual_material" rgba="0.640933 0.640933 0.640933 1" />
+    <material name="foot_pivot_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="foot_left_visual_material" rgba="0.642682 0.642682 0.642682 1" />
+    <material name="hip_pitch_right_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="hip_roll_right_visual_material" rgba="0.643463 0.645296 0.646395 1" />
+    <material name="femur_right_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="tibia_right_visual_material" rgba="0.640933 0.640933 0.640933 1" />
+    <material name="foot_pivot_2_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="foot_right_visual_material" rgba="0.642681 0.642681 0.642681 1" />
+    <material name="torso_yaw_visual_material" rgba="0.627451 0.627451 0.627451 1" />
+    <material name="torso_roll_visual_material" rgba="0.624995 0.726863 0.787984 1" />
+  </asset>
+  <actuator>
+    <position class="v_0_0_2" name="hip_pitch_left" joint="hip_pitch_left" inheritrange="1" />
+    <position class="v_0_0_2" name="hip_roll_left" joint="hip_roll_left" inheritrange="1" />
+    <position class="v_0_0_2" name="hip_yaw_left" joint="hip_yaw_left" inheritrange="1" />
+    <position class="v_0_0_2" name="knee_pitch_left" joint="knee_pitch_left" inheritrange="1" />
+    <position class="v_0_0_2" name="ankle_pitch_left" joint="ankle_pitch_left" inheritrange="1" />
+    <position class="v_0_0_2" name="ankle_roll_left" joint="ankle_roll_left" inheritrange="1" />
+    <position class="v_0_0_2" name="hip_pitch_right" joint="hip_pitch_right" inheritrange="1" />
+    <position class="v_0_0_2" name="hip_roll_right" joint="hip_roll_right" inheritrange="1" />
+    <position class="v_0_0_2" name="hip_yaw_right" joint="hip_yaw_right" inheritrange="1" />
+    <position class="v_0_0_2" name="knee_pitch_right" joint="knee_pitch_right" inheritrange="1" />
+    <position class="v_0_0_2" name="ankle_pitch_right" joint="ankle_pitch_right" inheritrange="1" />
+    <position class="v_0_0_2" name="ankle_roll_right" joint="ankle_roll_right" inheritrange="1" />
+    <position class="v_0_0_2" name="torso_yaw" joint="torso_yaw" inheritrange="1" />
+    <position class="v_0_0_2" name="torso_roll" joint="torso_roll" inheritrange="1" />
+  </actuator>
+  <equality />
+
+  <sensor>
+    <!-- Joint position sensors -->
+    <jointpos name="hip_pitch_left_pos" joint="hip_pitch_left"/>
+    <jointpos name="hip_roll_left_pos" joint="hip_roll_left"/>
+    <jointpos name="hip_yaw_left_pos" joint="hip_yaw_left"/>
+    <jointpos name="knee_pitch_left_pos" joint="knee_pitch_left"/>
+    <jointpos name="ankle_pitch_left_pos" joint="ankle_pitch_left"/>
+    <jointpos name="ankle_roll_left_pos" joint="ankle_roll_left"/>
+    <jointpos name="hip_pitch_right_pos" joint="hip_pitch_right"/>
+    <jointpos name="hip_roll_right_pos" joint="hip_roll_right"/>
+    <jointpos name="hip_yaw_right_pos" joint="hip_yaw_right"/>
+    <jointpos name="knee_pitch_right_pos" joint="knee_pitch_right"/>
+    <jointpos name="ankle_pitch_right_pos" joint="ankle_pitch_right"/>
+    <jointpos name="ankle_roll_right_pos" joint="ankle_roll_right"/>
+    <jointpos name="torso_yaw_pos" joint="torso_yaw"/>
+    <jointpos name="torso_roll_pos" joint="torso_roll"/>
+
+    <!-- Joint velocity sensors -->
+    <jointvel name="hip_pitch_left_vel" joint="hip_pitch_left"/>
+    <jointvel name="hip_roll_left_vel" joint="hip_roll_left"/>
+    <jointvel name="hip_yaw_left_vel" joint="hip_yaw_left"/>
+    <jointvel name="knee_pitch_left_vel" joint="knee_pitch_left"/>
+    <jointvel name="ankle_pitch_left_vel" joint="ankle_pitch_left"/>
+    <jointvel name="ankle_roll_left_vel" joint="ankle_roll_left"/>
+    <jointvel name="hip_pitch_right_vel" joint="hip_pitch_right"/>
+    <jointvel name="hip_roll_right_vel" joint="hip_roll_right"/>
+    <jointvel name="hip_yaw_right_vel" joint="hip_yaw_right"/>
+    <jointvel name="knee_pitch_right_vel" joint="knee_pitch_right"/>
+    <jointvel name="ankle_pitch_right_vel" joint="ankle_pitch_right"/>
+    <jointvel name="ankle_roll_right_vel" joint="ankle_roll_right"/>
+    <jointvel name="torso_yaw_vel" joint="torso_yaw"/>
+    <jointvel name="torso_roll_vel" joint="torso_roll"/>
+
+    <!-- Joint torque sensors -->
+    <jointactuatorfrc name="hip_pitch_left_torque" joint="hip_pitch_left"/>
+    <jointactuatorfrc name="hip_roll_left_torque" joint="hip_roll_left"/>
+    <jointactuatorfrc name="hip_yaw_left_torque" joint="hip_yaw_left"/>
+    <jointactuatorfrc name="knee_pitch_left_torque" joint="knee_pitch_left"/>
+    <jointactuatorfrc name="ankle_pitch_left_torque" joint="ankle_pitch_left"/>
+    <jointactuatorfrc name="ankle_roll_left_torque" joint="ankle_roll_left"/>
+    <jointactuatorfrc name="hip_pitch_right_torque" joint="hip_pitch_right"/>
+    <jointactuatorfrc name="hip_roll_right_torque" joint="hip_roll_right"/>
+    <jointactuatorfrc name="hip_yaw_right_torque" joint="hip_yaw_right"/>
+    <jointactuatorfrc name="knee_pitch_right_torque" joint="knee_pitch_right"/>
+    <jointactuatorfrc name="ankle_pitch_right_torque" joint="ankle_pitch_right"/>
+    <jointactuatorfrc name="ankle_roll_right_torque" joint="ankle_roll_right"/>
+    <jointactuatorfrc name="torso_yaw_torque" joint="torso_yaw"/>
+    <jointactuatorfrc name="torso_roll_torque" joint="torso_roll"/>
+
+    <!-- IMU sensors -->
+    <framequat name="imu_quat" objtype="site" objname="IMU_hip"/>
+    <gyro name="imu_gyro" site="IMU_hip"/>
+    <accelerometer name="imu_acc" site="IMU_hip"/>
+    <framepos name="frame_pos" objtype="site" objname="IMU_hip"/>
+    <framelinvel name="frame_vel" objtype="site" objname="IMU_hip"/>
+    <framequat name="secondary_imu_quat" objtype="site" objname="IMU_torso"/>
+    <gyro name="secondary_imu_gyro" site="IMU_torso" noise="5e-4" cutoff="34.9"/>
+    <accelerometer name="secondary_imu_acc" site="IMU_torso" noise="1e-2" cutoff="157"/>
+  </sensor>
+
+  <!-- setup scene -->
+  <statistic center="1.0 0.7 1.0" extent="0.8"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0.9 0.9 0.9"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-140" elevation="-20"/>
+  </visual>
+  <asset>
+    <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+  <worldbody>
+    <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+  </worldbody>
+
+</mujoco>

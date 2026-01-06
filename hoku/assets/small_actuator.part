@@ -1,0 +1,13 @@
+{
+    "configuration": "default",
+    "documentId": "86357a6ac14570745ed42c13",
+    "documentMicroversion": "c3f48c628c2d93ea7a2c378c",
+    "elementId": "bff8cfc0cb6f1d60ac91ef2d",
+    "fullConfiguration": "default",
+    "id": "IRvjNNgzPOKL9StKo",
+    "isStandardContent": false,
+    "name": "small_actuator <2>",
+    "partId": "JHD",
+    "suppressed": false,
+    "type": "Part"
+}
