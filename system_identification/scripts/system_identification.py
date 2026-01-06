@@ -1580,33 +1580,37 @@ To add new IK types, use IKRegistry.register() in your code.
         sysid.setup()
         sysid.run_identification()
         
-        # Generate timestamp for output folder
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Resolve output base path (relative to package if not absolute)
-        output_base = Path(args.output)
-        if not output_base.is_absolute():
-            # Make relative paths relative to package root
-            package_root = Path(__file__).resolve().parent.parent
-            output_base = package_root / output_base
-        
-        # Create timestamped output folder
-        output_dir = output_base / f"sysid_{timestamp}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"\nOutput folder: {output_dir}")
-        
+        # Check if any saving is requested
+        any_saving = args.save_json or args.save_plots or args.save_torch
+
+        if any_saving:
+            # Generate timestamp for output folder
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Resolve output base path (relative to package if not absolute)
+            output_base = Path(args.output)
+            if not output_base.is_absolute():
+                # Make relative paths relative to package root
+                package_root = Path(__file__).resolve().parent.parent
+                output_base = package_root / output_base
+
+            # Create timestamped output folder
+            output_dir = output_base / f"sysid_{timestamp}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\nOutput folder: {output_dir}")
+        else:
+            print("\nNo output saved (--no-save specified)")
+
         # Save JSON results
         if args.save_json:
             output_file = output_dir / "results.json"
             sysid.save_results(str(output_file))
-        else:
-            print("JSON results not saved (--no-save specified)")
-        
+
         # Save PyTorch format
         if args.save_torch:
             torch_file = output_dir / "results.pt"
             sysid.save_torch(str(torch_file))
-        
+
         # Save plots
         if args.save_plots:
             plots_dir = output_dir / "plots"
