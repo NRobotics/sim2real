@@ -240,76 +240,75 @@ def run_command_test(
     """Test position command with feedback (holds current position)."""
     print("\n[3] COMMAND TEST")
     print("-" * 40)
-
-    # Use first motor only to minimize risk
-    test_motor = motor_ids[0]
-
-    # First, get current position via ping
-    print(f"Getting current position of motor {test_motor}...")
-    current_pos = _get_current_position(controller, test_motor, timeout=1.0)
-
-    if current_pos is None:
-        return TestResult(
-            name="Command",
-            passed=False,
-            message="Could not get current position via ping",
-            details={},
-            duration_ms=0,
-        )
-
-    print(f"  Current position: {current_pos:+.4f} rad")
-    print("  Sending hold command (same position, low stiffness)...")
+    print(f"Testing {len(motor_ids)} motors: {motor_ids}")
 
     start = time.perf_counter()
-    feedback_received = threading.Event()
-    feedback_data: dict[str, Any] = {}
+    results: dict[int, dict[str, Any]] = {}
+    failed_motors: list[int] = []
 
-    def on_feedback(can_id: int, feedback: Any):
-        feedback_data["angle"] = feedback.angle
-        feedback_data["velocity"] = feedback.velocity
-        feedback_data["effort"] = feedback.effort
-        feedback_received.set()
+    for test_motor in motor_ids:
+        # Get current position via ping
+        if verbose:
+            print(f"  Motor {test_motor}: getting position...")
+        current_pos = _get_current_position(controller, test_motor)
 
-    # Register callback
-    controller.set_feedback_callback(test_motor, on_feedback)
+        if current_pos is None:
+            failed_motors.append(test_motor)
+            print(f"  ✗ Motor {test_motor}: no ping response")
+            continue
 
-    # Start motor
-    controller.start_motor(test_motor)
-    time.sleep(0.1)
+        # Setup feedback tracking
+        feedback_received = threading.Event()
+        feedback_data: dict[str, Any] = {"motor": test_motor}
 
-    # Send hold command at CURRENT position (safe - no movement)
-    cmd = ControlData(
-        angle=current_pos,  # Hold current position
-        velocity=0.0,
-        effort=0.0,
-        stiffness=3.0,  # Very low stiffness
-        damping=0.5,    # Some damping to resist disturbances
-    )
-    controller.send_kinematics_for_motor(test_motor, cmd)
+        def on_feedback(can_id: int, feedback: Any):
+            feedback_data["angle"] = feedback.angle
+            feedback_data["velocity"] = feedback.velocity
+            feedback_data["effort"] = feedback.effort
+            feedback_received.set()
 
-    # Wait for feedback
-    success = feedback_received.wait(timeout=1.0)
+        controller.set_feedback_callback(test_motor, on_feedback)
+        controller.start_motor(test_motor)
+        time.sleep(0.05)
+
+        # Send hold command at CURRENT position (safe - no movement)
+        cmd = ControlData(
+            angle=current_pos,
+            velocity=0.0,
+            effort=0.0,
+            stiffness=3.0,
+            damping=0.5,
+        )
+        controller.send_kinematics_for_motor(test_motor, cmd)
+
+        # Wait for feedback
+        if feedback_received.wait(timeout=1.0):
+            results[test_motor] = feedback_data
+            if verbose:
+                pos = feedback_data['angle']
+                print(f"  ✓ Motor {test_motor}: pos={pos:+.4f}")
+        else:
+            failed_motors.append(test_motor)
+            print(f"  ✗ Motor {test_motor}: no feedback")
+
     duration = (time.perf_counter() - start) * 1000
+    passed = len(failed_motors) == 0 and len(results) == len(motor_ids)
 
-    if success:
-        print(f"  ✓ Feedback received in {duration:.1f}ms")
-        print(f"    Position: {feedback_data['angle']:+.4f} rad")
-        print(f"    Velocity: {feedback_data['velocity']:+.4f} rad/s")
-        print(f"    Effort:   {feedback_data['effort']:+.4f}")
+    if passed:
+        print(f"  ✓ All {len(motor_ids)} motors responded")
         return TestResult(
             name="Command",
             passed=True,
-            message="Position command executed with feedback",
-            details=feedback_data,
+            message=f"All {len(motor_ids)} motors OK",
+            details={"results": results},
             duration_ms=duration,
         )
     else:
-        print(f"  ✗ No feedback received after {duration:.1f}ms")
         return TestResult(
             name="Command",
             passed=False,
-            message="No feedback received for position command",
-            details={},
+            message=f"Failed: {failed_motors}",
+            details={"failed": failed_motors, "results": results},
             duration_ms=duration,
         )
 
@@ -322,102 +321,80 @@ def run_timing_test(
     controller,
     motor_ids: list[int],
     verbose: bool = False,
-    num_samples: int = 100,
+    num_samples: int = 50,
 ) -> TestResult:
     """Measure command-to-feedback latency (holds current position)."""
     print("\n[4] TIMING TEST")
     print("-" * 40)
+    print(f"Testing {len(motor_ids)} motors, {num_samples} samples each")
 
-    test_motor = motor_ids[0]
+    all_latencies: list[float] = []
+    motor_results: dict[int, dict] = {}
+    failed: list[int] = []
 
-    # Get current position first
-    current_pos = _get_current_position(controller, test_motor, timeout=1.0)
-    if current_pos is None:
-        return TestResult(
-            name="Timing",
-            passed=False,
-            message="Could not get current position via ping",
-            details={},
-            duration_ms=0,
-        )
+    for mid in motor_ids:
+        pos = _get_current_position(controller, mid)
+        if pos is None:
+            failed.append(mid)
+            print(f"  ✗ Motor {mid}: no ping")
+            continue
 
-    print(f"Measuring latency for motor {test_motor} ({num_samples} samples)")
-    print(f"  Holding position: {current_pos:+.4f} rad")
+        # Setup
+        latencies: list[float] = []
+        event = threading.Event()
+        recv_time = [0.0]
 
-    latencies: list[float] = []
-    feedback_event = threading.Event()
-    recv_time = [0.0]
+        def on_fb(can_id: int, fb: Any):
+            recv_time[0] = time.perf_counter()
+            event.set()
 
-    def on_feedback(can_id: int, feedback: Any):
-        recv_time[0] = time.perf_counter()
-        feedback_event.set()
+        controller.set_feedback_callback(mid, on_fb)
+        controller.start_motor(mid)
+        time.sleep(0.05)
 
-    # Register callback
-    controller.set_feedback_callback(test_motor, on_feedback)
+        cmd = ControlData(pos, 0.0, 0.0, 3.0, 0.5)
 
-    # Start motor
-    controller.start_motor(test_motor)
-    time.sleep(0.1)
+        # Collect samples
+        for _ in range(num_samples):
+            event.clear()
+            t0 = time.perf_counter()
+            controller.send_kinematics_for_motor(mid, cmd)
+            if event.wait(timeout=0.1):
+                latencies.append((recv_time[0] - t0) * 1000)
+            time.sleep(0.01)
 
-    # Measure latencies - hold current position (safe)
-    cmd = ControlData(
-        angle=current_pos,
-        velocity=0.0,
-        effort=0.0,
-        stiffness=3.0,
-        damping=0.5,
-    )
-
-    for i in range(num_samples):
-        feedback_event.clear()
-        send_time = time.perf_counter()
-        controller.send_kinematics_for_motor(test_motor, cmd)
-
-        if feedback_event.wait(timeout=0.1):
-            latency = (recv_time[0] - send_time) * 1000
-            latencies.append(latency)
-            if verbose and i % 20 == 0:
-                print(f"  Sample {i}: {latency:.2f}ms")
+        if latencies:
+            avg = sum(latencies) / len(latencies)
+            motor_results[mid] = {
+                "avg_ms": avg,
+                "min_ms": min(latencies),
+                "max_ms": max(latencies),
+                "count": len(latencies),
+            }
+            all_latencies.extend(latencies)
+            n = len(latencies)
+            print(f"  Motor {mid}: {avg:.2f}ms ({n}/{num_samples})")
         else:
-            if verbose:
-                print(f"  Sample {i}: timeout")
+            failed.append(mid)
+            print(f"  ✗ Motor {mid}: no response")
 
-        time.sleep(0.01)  # 10ms between samples
+    if not all_latencies:
+        return TestResult("Timing", False, "No data", {}, 0)
 
-    if not latencies:
-        return TestResult(
-            name="Timing",
-            passed=False,
-            message="No latency measurements collected",
-            details={},
-            duration_ms=0,
-        )
+    # Stats
+    avg = sum(all_latencies) / len(all_latencies)
+    total = num_samples * len(motor_ids)
+    rate = len(all_latencies) / total * 100
 
-    # Calculate stats
-    avg_latency = sum(latencies) / len(latencies)
-    min_latency = min(latencies)
-    max_latency = max(latencies)
-    success_rate = len(latencies) / num_samples * 100
+    print(f"  Avg: {avg:.2f}ms ({rate:.0f}% success)")
 
-    print(f"  Samples: {len(latencies)}/{num_samples} ({success_rate:.1f}%)")
-    print(f"  Latency: avg={avg_latency:.2f}ms, "
-          f"min={min_latency:.2f}ms, max={max_latency:.2f}ms")
-
-    # Pass if >90% success and avg latency <10ms
-    passed = success_rate >= 90 and avg_latency < 10
-
+    passed = rate >= 90 and avg < 10 and not failed
     return TestResult(
         name="Timing",
         passed=passed,
-        message=f"Avg: {avg_latency:.2f}ms ({success_rate:.0f}% success)",
-        details={
-            "avg_ms": avg_latency,
-            "min_ms": min_latency,
-            "max_ms": max_latency,
-            "success_rate": success_rate,
-            "samples": len(latencies),
-        },
-        duration_ms=avg_latency,
+        message=f"Avg: {avg:.2f}ms ({rate:.0f}%)",
+        details={"avg_ms": avg, "per_motor": motor_results, "failed": failed},
+        duration_ms=avg,
     )
 
 
@@ -444,45 +421,51 @@ def run_stress_test(
     """
     print("\n[5] STRESS TEST")
     print("-" * 40)
+    print(f"Testing {len(motor_ids)} motors: {motor_ids}")
 
-    test_motor = motor_ids[0]
+    # Get current positions for all motors
+    positions: dict[int, float] = {}
+    for mid in motor_ids:
+        pos = _get_current_position(controller, mid, timeout=1.0)
+        if pos is None:
+            return TestResult(
+                name="Stress",
+                passed=False,
+                message=f"Could not get position for motor {mid}",
+                details={},
+                duration_ms=0,
+            )
+        positions[mid] = pos
+        if verbose:
+            print(f"  Motor {mid}: {pos:+.4f} rad")
 
-    # Get current position first
-    current_pos = _get_current_position(controller, test_motor, timeout=1.0)
-    if current_pos is None:
-        return TestResult(
-            name="Stress",
-            passed=False,
-            message="Could not get current position via ping",
-            details={},
-            duration_ms=0,
-        )
-
-    print(f"Running stress test for {duration}s at {rate} Hz")
-    print(f"  Motor: {test_motor}")
-    print(f"  Holding position: {current_pos:+.4f} rad")
+    print(f"Running for {duration}s at {rate} Hz")
     print(f"  Expected samples: {int(duration * rate)}")
 
     # Import async loop
     from async_loop import AsyncControlLoop
 
-    # Start motor
-    controller.start_motor(test_motor)
+    # Start motors
+    for mid in motor_ids:
+        controller.start_motor(mid)
+        time.sleep(0.05)
     time.sleep(0.1)
 
-    # Create hold command
-    hold_cmd = ControlData(
-        angle=current_pos,
-        velocity=0.0,
-        effort=0.0,
-        stiffness=3.0,
-        damping=0.5,
-    )
+    # Create hold commands for all motors
+    hold_cmds: dict[int, ControlData] = {}
+    for mid in motor_ids:
+        hold_cmds[mid] = ControlData(
+            angle=positions[mid],
+            velocity=0.0,
+            effort=0.0,
+            stiffness=3.0,
+            damping=0.5,
+        )
 
-    # Build async loop for single motor
+    # Build async loop
     async_loop = AsyncControlLoop(
         controller=controller,
-        motor_ids=[test_motor],
+        motor_ids=motor_ids,
         target_rate=rate,
         use_busy_wait=False,
     )
@@ -494,10 +477,10 @@ def run_stress_test(
     def generate_control():
         sample_count[0] += 1
         is_complete = sample_count[0] >= expected_samples
-        return {test_motor: hold_cmd}, is_complete
+        return hold_cmds, is_complete
 
     def get_commanded_angles():
-        return {test_motor: current_pos}
+        return positions
 
     def get_progress():
         return sample_count[0] / expected_samples
@@ -522,14 +505,29 @@ def run_stress_test(
     missed_pct = stats.get("missed_deadline_pct", 0)
     actual_rate = total_cycles / elapsed if elapsed > 0 else 0
 
-    # Per-motor stats (keys are integers, not strings)
+    # Aggregate per-motor stats
     per_motor = stats.get("per_motor", {})
-    motor_stats = per_motor.get(test_motor, {})
-    fb_received = motor_stats.get("feedbacks_received", 0)
-    fb_rate = motor_stats.get("feedback_rate_pct", 0)
-    late_fb = motor_stats.get("late_feedbacks", 0)
-    avg_latency = motor_stats.get("avg_latency_ms", 0)
-    max_latency = motor_stats.get("max_latency_ms", 0)
+    total_fb = 0
+    total_late = 0
+    all_latencies: list[float] = []
+
+    for mid in motor_ids:
+        m_stats = per_motor.get(mid, {})
+        total_fb += m_stats.get("feedbacks_received", 0)
+        total_late += m_stats.get("late_feedbacks", 0)
+        if m_stats.get("avg_latency_ms", 0) > 0:
+            all_latencies.append(m_stats["avg_latency_ms"])
+
+    expected_fb = total_cycles * len(motor_ids)
+    fb_rate = (total_fb / expected_fb * 100) if expected_fb > 0 else 0
+    if all_latencies:
+        avg_latency = sum(all_latencies) / len(all_latencies)
+    else:
+        avg_latency = 0
+    max_lat = max(
+        (per_motor.get(m, {}).get("max_latency_ms", 0) for m in motor_ids),
+        default=0,
+    )
 
     # Print results
     print("\n  Results:")
@@ -537,9 +535,9 @@ def run_stress_test(
     print(f"    Samples: {total_cycles}")
     print(f"    Actual rate: {actual_rate:.1f} Hz (target: {rate} Hz)")
     print(f"    Missed deadlines: {missed_deadlines} ({missed_pct:.1f}%)")
-    print(f"    Feedbacks: {fb_received}/{total_cycles} ({fb_rate:.1f}%)")
-    print(f"    Late feedbacks: {late_fb}")
-    print(f"    Latency: avg={avg_latency:.2f}ms, max={max_latency:.2f}ms")
+    print(f"    Feedbacks: {total_fb}/{expected_fb} ({fb_rate:.1f}%)")
+    print(f"    Late feedbacks: {total_late}")
+    print(f"    Latency: avg={avg_latency:.2f}ms, max={max_lat:.2f}ms")
 
     # Pass criteria:
     # - < 5% missed deadlines
@@ -573,11 +571,13 @@ def run_stress_test(
             "actual_rate": actual_rate,
             "missed_deadlines": missed_deadlines,
             "missed_pct": missed_pct,
-            "feedback_received": fb_received,
+            "feedback_received": total_fb,
             "feedback_rate_pct": fb_rate,
-            "late_feedbacks": late_fb,
+            "late_feedbacks": total_late,
             "avg_latency_ms": avg_latency,
-            "max_latency_ms": max_latency,
+            "max_latency_ms": max_lat,
+            "motors_tested": motor_ids,
+            "per_motor": per_motor,
         },
         duration_ms=elapsed * 1000,
     )

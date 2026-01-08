@@ -163,9 +163,7 @@ def main() -> int:
         # Stress test (optional - must be explicitly enabled)
         if args.stress and "stress" not in args.skip:
             r = run_stress_test(
-                controller,
-                motor_ids,
-                args.verbose,
+                controller, motor_ids, args.verbose,
                 duration=args.stress_duration,
                 rate=args.stress_rate,
             )
