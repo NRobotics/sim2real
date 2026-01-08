@@ -4,8 +4,9 @@ Core SystemIdentification class for robot actuator identification.
 Handles:
 - Motor configuration and setup
 - Chirp signal generation and control
-- Feedback collection and timing
+- Asynchronous feedback collection and timing
 - Results saving (JSON, PyTorch, plots)
+- Communication statistics tracking
 """
 
 from __future__ import annotations
@@ -15,8 +16,6 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,13 +26,15 @@ _script_dir = Path(__file__).resolve().parent
 if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 
+# ruff: noqa: E402
 from humanoid_messages.can import (
+    CANBusError,
     ConfigurationData,
     ControlData,
-    FeedbackData,
     MotorCANController,
 )
 
+from async_loop import AsyncControlLoop, AsyncControlLoopBuilder
 from chirp import ChirpGenerator, IKChirpGenerator
 from controllers import MockMotorCANController
 from ik_registry import IKRegistry
@@ -56,15 +57,8 @@ except ImportError:
         MUJOCO_AVAILABLE = False
 
 
-def busy_sleep(duration: float) -> None:
-    """Accurate sleep using busy-wait."""
-    end_time = time.perf_counter() + duration
-    while time.perf_counter() < end_time:
-        pass
-
-
 class SystemIdentification:
-    """Main system identification controller."""
+    """Main system identification controller with async communication."""
 
     def __init__(
         self,
@@ -95,10 +89,8 @@ class SystemIdentification:
         self.motor_to_ik_group: dict[int, tuple[str, int]] = {}
         self.direct_motors: set[int] = set()
 
-        # Feedback collection
+        # Feedback collection (populated by async loop)
         self.feedback_data: dict[int, list[dict]] = defaultdict(list)
-        self.feedback_received = threading.Event()
-        self.feedbacks_to_receive: set[int] = set()
 
         # Command tracking
         self.commanded_angles: dict[int, float] = {}
@@ -107,6 +99,19 @@ class SystemIdentification:
         # Timing
         self.start_time = 0.0
         self.sample_count = 0
+
+        # Async loop and stats
+        self.async_loop: AsyncControlLoop | None = None
+        self.comm_stats: dict[str, Any] = {}
+
+        # Position tracking for ping-based queries
+        self._current_positions: dict[int, float] = {}
+        self._positions_lock = threading.Lock()
+        self._pending_pings: set[int] = set()
+        self._pings_received = threading.Event()
+
+        # Motor safety limits: {can_id: (min_pos, max_pos)}
+        self.motor_limits: dict[int, tuple[float, float]] = {}
 
     def _load_config(self, config_file: str) -> dict:
         with Path(config_file).open() as f:
@@ -127,7 +132,14 @@ class SystemIdentification:
     def _create_controller(self):
         if self.dry_run:
             print("[DRY-RUN] Running without hardware - using mock controller")
-            return MockMotorCANController(**self.config["can_interface"])
+            # Get mock-specific settings from config
+            mock_cfg = self.config.get("mock", {})
+            return MockMotorCANController(
+                latency_mean=mock_cfg.get("latency_mean", 0.002),
+                latency_std=mock_cfg.get("latency_std", 0.0005),
+                drop_rate=mock_cfg.get("drop_rate", 0.0),
+                **self.config.get("can_interface", {}),
+            )
 
         if self.use_mujoco:
             if not MUJOCO_AVAILABLE:
@@ -149,47 +161,290 @@ class SystemIdentification:
         if not self.configs_to_receive:
             self.config_received.set()
 
-    def _feedback_callback(self, can_id: int, feedback: FeedbackData) -> None:
-        fb = asdict(feedback)
-        fb["timestamp"] = time.time() - self.start_time
-        fb["sample"] = self.sample_count
-        fb["commanded_angle"] = self.commanded_angles.get(can_id, 0.0)
-        fb["angle_error"] = feedback.angle - fb["commanded_angle"]
+    def _ping_feedback_callback(self, can_id: int, feedback: Any) -> None:
+        """Callback for ping responses - updates current positions."""
+        with self._positions_lock:
+            self._current_positions[can_id] = feedback.angle
+            self._pending_pings.discard(can_id)
+            if not self._pending_pings:
+                self._pings_received.set()
 
-        # Add IK group info
+    def ping_current_positions(self, timeout: float = 1.0) -> dict[int, float]:
+        """
+        Get current motor positions by pinging motors.
+
+        Uses ping_motor() to request feedback without sending control commands.
+        This is cleaner than sending dummy commands with zero stiffness/damping.
+
+        Args:
+            timeout: Maximum time to wait for all responses [s]
+
+        Returns:
+            Dict mapping motor_id -> current angle [rad]
+        """
+        # Setup tracking
+        with self._positions_lock:
+            self._pending_pings = set(self.motor_ids)
+            self._pings_received.clear()
+
+        # Register callbacks for ping responses
+        for can_id in self.motor_ids:
+            self.controller.set_feedback_callback(can_id, self._ping_feedback_callback)
+
+        # Ping all motors
+        for can_id in self.motor_ids:
+            self.controller.ping_motor(can_id)
+
+        # Wait for responses
+        if not self._pings_received.wait(timeout=timeout):
+            with self._positions_lock:
+                missing = self._pending_pings
+                if missing:
+                    print(f"Warning: No ping response from motors: {sorted(missing)}")
+
+        # Return positions (zeros for motors that didn't respond)
+        with self._positions_lock:
+            return {
+                can_id: self._current_positions.get(can_id, 0.0)
+                for can_id in self.motor_ids
+            }
+
+    def _clamp_angle(self, can_id: int, angle: float) -> float:
+        """Clamp angle to configured safety limits."""
+        if can_id in self.motor_limits:
+            min_lim, max_lim = self.motor_limits[can_id]
+            return max(min_lim, min(max_lim, angle))
+        return angle
+
+    def _angular_interpolation(
+        self,
+        start: dict[int, float],
+        target: dict[int, float],
+        alpha: float,
+    ) -> dict[int, float]:
+        """Interpolate between angles using shortest angular path."""
+        result = {}
+        for can_id in target:
+            s = start.get(can_id, self._current_positions.get(can_id, 0.0))
+            t = target[can_id]
+            # Wrap difference to [-π, π] for shortest path
+            diff = (t - s + np.pi) % (2 * np.pi) - np.pi
+            result[can_id] = s + diff * alpha
+        return result
+
+    def _get_control_params(self, can_id: int) -> dict:
+        """Get control parameters for a motor (per-motor > per-group > global)."""
+        global_params = self.config["control_parameters"]
+
+        # Check per-motor config
+        motor_cfg = self.config.get("motors", {}).get(str(can_id), {})
+        if "control_parameters" in motor_cfg:
+            p = motor_cfg["control_parameters"]
+            return {
+                "velocity": p.get("velocity", global_params["velocity"]),
+                "effort": p.get("effort", global_params["effort"]),
+                "stiffness": p.get("stiffness", global_params["stiffness"]),
+                "damping": p.get("damping", global_params["damping"]),
+            }
+
+        # Check per-group config
         if can_id in self.motor_to_ik_group:
             group_name, _ = self.motor_to_ik_group[can_id]
-            fb["ik_group"] = group_name
-            for name, val in self.commanded_ik_inputs.get(group_name, {}).items():
-                fb[f"commanded_{name}"] = val
+            for g in self.config.get("ik_groups", []):
+                if g["name"] == group_name and "control_parameters" in g:
+                    p = g["control_parameters"]
+                    return {
+                        "velocity": p.get("velocity", global_params["velocity"]),
+                        "effort": p.get("effort", global_params["effort"]),
+                        "stiffness": p.get("stiffness", global_params["stiffness"]),
+                        "damping": p.get("damping", global_params["damping"]),
+                    }
 
-        self.feedback_data[can_id].append(fb)
-        self.feedbacks_to_receive.discard(can_id)
-        if not self.feedbacks_to_receive:
-            self.feedback_received.set()
+        return global_params.copy()
+
+    def _get_initial_chirp_positions(self) -> dict[int, float]:
+        """Get first chirp position for each motor without consuming samples."""
+        positions = {}
+
+        # Direct motors
+        for can_id in self.direct_motors:
+            if can_id in self.chirp_generators:
+                gen = self.chirp_generators[can_id]
+                gen.reset()
+                angle, _ = gen.get_next()
+                positions[can_id] = angle
+                gen.reset()  # Reset again so main loop starts fresh
+
+        # IK groups
+        for group_name, ik_gen in self.ik_generators.items():
+            group_motors = sorted(
+                [m for m, (g, _) in self.motor_to_ik_group.items() if g == group_name],
+                key=lambda m: self.motor_to_ik_group[m][1],
+            )
+            ik_gen.reset()
+            _, angles, _ = ik_gen.get_next()
+            ik_gen.reset()
+            for i, mid in enumerate(group_motors):
+                if i < len(angles):
+                    positions[mid] = angles[i]
+
+        return positions
+
+    def _send_interpolated_commands(
+        self,
+        positions: dict[int, float],
+        rate: float = 50.0,
+    ) -> None:
+        """Send position commands at given rate, used for init/finalize phases."""
+        for can_id, angle in positions.items():
+            safe_angle = self._clamp_angle(can_id, angle)
+            self.commanded_angles[can_id] = angle
+            params = self._get_control_params(can_id)
+            ctrl = ControlData(
+                angle=safe_angle,
+                velocity=params["velocity"],
+                effort=params["effort"],
+                stiffness=params["stiffness"],
+                damping=params["damping"],
+            )
+            self.controller.send_kinematics_for_motor(can_id, ctrl)
+
+    def _initialize_to_chirp_start(self, duration: float = 2.0) -> None:
+        """Smoothly interpolate from current position to initial chirp position."""
+        print("\n=== Initialization Phase ===")
+        print("Getting current motor positions via ping...")
+
+        start = self.ping_current_positions(timeout=1.0)
+        print(f"  Current positions: {start}")
+
+        target = self._get_initial_chirp_positions()
+        print(f"  Target positions: {target}")
+
+        print(f"Interpolating to initial chirp position over {duration}s...")
+        rate = 50.0
+        period = 1.0 / rate
+        t_start = time.perf_counter()
+
+        while True:
+            elapsed = time.perf_counter() - t_start
+            alpha = min(1.0, elapsed / duration)
+            positions = self._angular_interpolation(start, target, alpha)
+            self._send_interpolated_commands(positions, rate)
+            if alpha >= 1.0:
+                break
+            time.sleep(period)
+
+        print("  ✓ Initialization complete\n")
+
+    def _finalize_to_zero(self, duration: float = 2.0) -> None:
+        """Smoothly interpolate from current position back to zero."""
+        print("\n=== Finalization Phase ===")
+        print("Interpolating back to zero position...")
+
+        start = {can_id: self.commanded_angles.get(can_id, 0.0) for can_id in self.motor_ids}
+        target = {can_id: 0.0 for can_id in self.motor_ids}
+
+        rate = 50.0
+        period = 1.0 / rate
+        t_start = time.perf_counter()
+
+        while True:
+            elapsed = time.perf_counter() - t_start
+            alpha = min(1.0, elapsed / duration)
+            positions = self._angular_interpolation(start, target, alpha)
+            self._send_interpolated_commands(positions, rate)
+            if alpha >= 1.0:
+                break
+            time.sleep(period)
+
+        print("  ✓ Finalization complete\n")
 
     def setup(self) -> None:
         """Initialize controller and configure motors."""
-        print(f"Starting CAN controller for motors: {self.motor_ids}")
-        self.controller.start()
+        print(f"Starting controller for motors: {self.motor_ids}")
+
+        # Load motor safety limits from config
+        self._load_motor_limits()
+
+        try:
+            self.controller.start()
+        except CANBusError as e:
+            error_msg = str(e)
+            if "No such device" in error_msg or "can0" in error_msg.lower():
+                print(f"\nError: {error_msg}")
+                print("\nNo CAN device found. Options:")
+                print("  1. Use MuJoCo simulation:  --mujoco")
+                print("  2. Use dry-run mode:       --dry-run")
+                print("  3. Connect CAN device:     sudo ip link set can0 up type can bitrate 1000000")
+                raise SystemExit(1) from e
+            raise
         time.sleep(0.1)
 
-        # Register callbacks
-        for can_id in self.motor_ids:
-            self.controller.set_config_callback(can_id, self._config_callback)
-            self.controller.set_feedback_callback(can_id, self._feedback_callback)
-
-        # Request configurations
-        print(f"Requesting configurations from motors: {self.motor_ids}")
-        for can_id in self.motor_ids:
-            self.controller.get_motor_configuration(can_id)
-
-        if not self.config_received.wait(timeout=2.0):
-            print(f"Warning: Missing configs from: {self.configs_to_receive}")
-        print(f"Received configurations from {len(self.motor_configs)} motors")
+        # Wait for connection (MuJoCo or hardware)
+        if not self.dry_run:
+            self._wait_for_connection()
 
         # Initialize generators
         self._setup_generators()
+
+    def _wait_for_connection(self, timeout: float = 30.0, retry_interval: float = 2.0) -> None:
+        """Wait for motors to respond before proceeding."""
+        print(f"Waiting for motor connection...")
+
+        # Register config callbacks
+        for can_id in self.motor_ids:
+            self.controller.set_config_callback(can_id, self._config_callback)
+
+        start_time = time.perf_counter()
+        attempt = 0
+
+        while True:
+            attempt += 1
+            elapsed = time.perf_counter() - start_time
+
+            if elapsed >= timeout:
+                print(f"\nTimeout: No response from motors after {timeout:.0f}s")
+                if self.use_mujoco:
+                    print("  → Start MuJoCo simulation first: python -m hoku.hoku_mujoco")
+                else:
+                    print("  → Check CAN connection and motor power")
+                raise SystemExit(1)
+
+            # Reset tracking for this attempt
+            self.configs_to_receive = set(self.motor_ids)
+            self.config_received.clear()
+
+            # Request configs
+            for can_id in self.motor_ids:
+                self.controller.get_motor_configuration(can_id)
+
+            # Wait for responses
+            if self.config_received.wait(timeout=retry_interval):
+                print(f"Received configurations from {len(self.motor_configs)} motors")
+                return
+
+            # Print waiting message
+            remaining = timeout - elapsed
+            print(f"  [{attempt}] Waiting for motors... ({remaining:.0f}s remaining)")
+
+    def _load_motor_limits(self) -> None:
+        """Load motor safety limits from config."""
+        # From direct motors config
+        for mid_str, cfg in self.config.get("motors", {}).items():
+            if "limits" in cfg:
+                self.motor_limits[int(mid_str)] = (
+                    float(cfg["limits"][0]),
+                    float(cfg["limits"][1]),
+                )
+
+        # From IK groups (overrides direct if both specified)
+        for group in self.config.get("ik_groups", []):
+            if "limits" in group:
+                for mid_str, lim in group["limits"].items():
+                    self.motor_limits[int(mid_str)] = (float(lim[0]), float(lim[1]))
+
+        if self.motor_limits:
+            print(f"Motor safety limits: {self.motor_limits}")
 
     def _setup_generators(self) -> None:
         """Setup chirp generators from config."""
@@ -307,93 +562,9 @@ class SystemIdentification:
                 print(f"    -> amplitude={gen.effective_amplitude:.4f} rad, "
                       f"offset={gen.effective_offset:.4f} rad")
 
-    def run_identification(self) -> None:
-        """Main identification loop."""
-        ctrl_params = self.config["control_parameters"]
-        chirp_cfg = self.config["chirp"]
-        expected_rate = chirp_cfg["sample_rate"]
-        rate_limited = chirp_cfg.get("rate_limit", True)
-
-        self._print_run_info(chirp_cfg, rate_limited, expected_rate)
-        self._start_motors()
-
-        # Timing setup
-        target_period = 1.0 / expected_rate if rate_limited else 0.0
-        feedback_timeout = target_period * 2 if rate_limited else 0.01
-        use_busy_wait = self.dry_run and rate_limited
-
-        self.start_time = time.perf_counter()
-        self.sample_count = 0
-        loop_times = []
-        missed_deadlines = 0
-        last_send_time = None
-        first_sample_done = False
-        is_complete = False
-
-        while not is_complete:
-            loop_start = time.perf_counter()
-
-            # Generate and send control
-            control_data, is_complete = self._generate_control(ctrl_params)
-            self._send_control(control_data)
-
-            # Wait for feedback
-            self.feedback_received.wait(timeout=feedback_timeout)
-
-            if not is_complete:
-                self.sample_count += 1
-
-            loop_times.append(time.perf_counter() - loop_start)
-
-            # Rate limiting
-            if rate_limited and last_send_time is not None:
-                elapsed = time.perf_counter() - last_send_time
-                sleep_time = target_period - elapsed
-                if sleep_time > 0:
-                    self._sleep(sleep_time, use_busy_wait, target_period, last_send_time)
-                elif not is_complete:
-                    missed_deadlines += 1
-
-            last_send_time = time.perf_counter()
-
-            if not first_sample_done:
-                self.start_time = time.perf_counter()
-                first_sample_done = True
-
-            # Early rate check
-            if rate_limited and self.sample_count == 10:
-                self._check_rate(loop_times, expected_rate)
-
-            # Progress
-            if self.sample_count % 100 == 0:
-                self._print_progress(expected_rate, rate_limited)
-
-        self._print_summary(loop_times, expected_rate, rate_limited, missed_deadlines)
-
-    def _print_run_info(self, chirp_cfg: dict, rate_limited: bool, expected_rate: float) -> None:
-        print("\nStarting system identification...")
-        if rate_limited:
-            print(f"Requested rate: {expected_rate} Hz")
-        else:
-            print("Rate limiting: DISABLED")
-            print(f"Signal has {int(expected_rate * chirp_cfg['duration'])} samples")
-        print(f"Duration: {chirp_cfg['duration']} seconds")
-        print(f"Frequency sweep: {chirp_cfg['f_start']} - {chirp_cfg['f_end']} Hz")
-        print(f"Motor CAN IDs: {self.motor_ids}")
-        if self.ik_generators:
-            print(f"IK groups: {list(self.ik_generators.keys())}")
-        if self.direct_motors:
-            print(f"Direct motors: {sorted(self.direct_motors)}")
-
-    def _start_motors(self) -> None:
-        for can_id in self.motor_ids:
-            self.controller.start_motor(can_id)
-            time.sleep(0.125)
-        print(f"Motors started: {self.motor_ids}")
-        time.sleep(1.0)
-
-    def _generate_control(self, ctrl_params: dict) -> tuple[dict[int, ControlData], bool]:
-        control_data = {}
+    def _generate_control(self) -> tuple[dict[int, ControlData], bool]:
+        """Generate control commands for all motors."""
+        control_data: dict[int, ControlData] = {}
         is_complete = False
 
         # IK groups
@@ -410,12 +581,14 @@ class SystemIdentification:
             for i, mid in enumerate(group_motors):
                 if i < len(angles):
                     self.commanded_angles[mid] = angles[i]
+                    safe_angle = self._clamp_angle(mid, angles[i])
+                    params = self._get_control_params(mid)
                     control_data[mid] = ControlData(
-                        angle=angles[i],
-                        velocity=ctrl_params["velocity"],
-                        effort=ctrl_params["effort"],
-                        stiffness=ctrl_params["stiffness"],
-                        damping=ctrl_params["damping"],
+                        angle=safe_angle,
+                        velocity=params["velocity"],
+                        effort=params["effort"],
+                        stiffness=params["stiffness"],
+                        damping=params["damping"],
                     )
 
         # Direct motors
@@ -426,90 +599,131 @@ class SystemIdentification:
             if complete:
                 is_complete = True
             self.commanded_angles[can_id] = angle
+            safe_angle = self._clamp_angle(can_id, angle)
+            params = self._get_control_params(can_id)
             control_data[can_id] = ControlData(
-                angle=angle,
-                velocity=ctrl_params["velocity"],
-                effort=ctrl_params["effort"],
-                stiffness=ctrl_params["stiffness"],
-                damping=ctrl_params["damping"],
+                angle=safe_angle,
+                velocity=params["velocity"],
+                effort=params["effort"],
+                stiffness=params["stiffness"],
+                damping=params["damping"],
             )
 
         return control_data, is_complete
 
-    def _send_control(self, control_data: dict[int, ControlData]) -> None:
-        self.feedbacks_to_receive = set(self.motor_ids)
-        self.feedback_received.clear()
+    def _get_commanded_angles(self) -> dict[int, float]:
+        """Get current commanded angles."""
+        return dict(self.commanded_angles)
 
-        # if hasattr(self.controller, 'send_kinematics_batch'):
-        #     self.controller.send_kinematics_batch(control_data)
-        # else:
-        for can_id, data in control_data.items():
-            self.controller.send_kinematics_for_motor(can_id, data)
+    def _get_ik_inputs(self) -> dict[str, dict[str, float]]:
+        """Get current IK inputs."""
+        return {k: dict(v) for k, v in self.commanded_ik_inputs.items()}
 
-    def _sleep(self, sleep_time: float, use_busy_wait: bool,
-               target_period: float, last_send_time: float) -> None:
-        if use_busy_wait:
-            busy_sleep(sleep_time)
-        elif sleep_time > 0.002:
-            time.sleep(sleep_time - 0.001)
-            remaining = target_period - (time.perf_counter() - last_send_time)
-            if remaining > 0:
-                busy_sleep(remaining)
-        else:
-            busy_sleep(sleep_time)
-
-    def _check_rate(self, loop_times: list, expected_rate: float) -> None:
-        avg = np.mean(loop_times)
-        max_rate = 1.0 / avg if avg > 0 else float('inf')
-        if max_rate < expected_rate * 0.9:
-            print(f"\n⚠️  WARNING: Requested rate {expected_rate} Hz too high!")
-            print(f"    CAN round-trip: ~{avg*1000:.1f} ms")
-            print(f"    Max achievable: ~{max_rate:.1f} Hz\n")
-
-    def _print_progress(self, expected_rate: float, rate_limited: bool) -> None:
+    def _get_progress(self) -> float:
+        """Get current progress (0.0 to 1.0)."""
         if self.ik_generators:
-            progress = next(iter(self.ik_generators.values())).get_progress() * 100
+            return next(iter(self.ik_generators.values())).get_progress()
         elif self.chirp_generators:
-            progress = next(iter(self.chirp_generators.values())).get_progress() * 100
-        else:
-            progress = 0.0
+            return next(iter(self.chirp_generators.values())).get_progress()
+        return 0.0
 
-        elapsed = time.perf_counter() - self.start_time
-        intervals = self.sample_count - 1
-        rate = intervals / elapsed if elapsed > 0 and intervals > 0 else expected_rate
+    def run_identification(self) -> None:
+        """Main identification loop using async architecture."""
+        chirp_cfg = self.config["chirp"]
+        expected_rate = chirp_cfg["sample_rate"]
+        rate_limited = chirp_cfg.get("rate_limit", True)
 
-        if rate_limited:
-            print(f"Progress: {progress:.1f}% | Sample: {self.sample_count} | "
-                  f"Rate: {rate:.1f}/{expected_rate:.0f} Hz")
-        else:
-            print(f"Progress: {progress:.1f}% | Sample: {self.sample_count} | Rate: {rate:.1f} Hz")
+        if not rate_limited:
+            print("\nWARNING: rate_limit=False is deprecated with async mode.")
+            print("Commands will be sent at the configured sample_rate.")
 
-    def _print_summary(self, loop_times: list, expected_rate: float,
-                       rate_limited: bool, missed_deadlines: int) -> None:
-        elapsed = time.perf_counter() - self.start_time
-        intervals = self.sample_count - 1
-        actual_rate = intervals / elapsed if elapsed > 0 and intervals > 0 else 0
-        avg_loop_ms = np.mean(loop_times) * 1000
+        self._print_run_info(chirp_cfg, expected_rate)
+        self._start_motors()
 
-        print("\nIdentification complete!")
-        print(f"Motors: {self.motor_ids}")
+        # Get interpolation duration from config
+        interp_duration = self.config.get("interpolation_duration", 2.0)
+
+        # Initialize: smoothly move from current position to chirp start
+        self._initialize_to_chirp_start(duration=interp_duration)
+
+        # Build async control loop
+        use_busy_wait = self.dry_run  # Use busy-wait in dry-run for accurate timing
+        self.async_loop = (
+            AsyncControlLoopBuilder(self.controller, self.motor_ids)
+            .with_rate(expected_rate)
+            .with_busy_wait(use_busy_wait)
+            .with_ik_mapping(self.motor_to_ik_group)
+            .build()
+        )
+
+        # Register feedback callbacks
+        self.async_loop.register_callbacks()
+
+        # Run the async loop
+        self.start_time = time.perf_counter()
+        self.async_loop.run(
+            generate_control=self._generate_control,
+            get_commanded_angles=self._get_commanded_angles,
+            get_ik_inputs=self._get_ik_inputs,
+            get_progress=self._get_progress,
+        )
+
+        # Collect results
+        self.feedback_data = defaultdict(list, self.async_loop.get_feedback_data())
+        self.sample_count = self.async_loop.sample_count
+        self.comm_stats = self.async_loop.get_stats()
+
+        # Print summary
+        self._print_summary()
+
+        # Finalize: smoothly return to zero position
+        self._finalize_to_zero(duration=interp_duration)
+
+    def _print_run_info(self, chirp_cfg: dict, expected_rate: float) -> None:
+        print("\n" + "=" * 60)
+        print("STARTING ASYNC SYSTEM IDENTIFICATION")
+        print("=" * 60)
+        print(f"Target rate: {expected_rate} Hz")
+        print(f"Duration: {chirp_cfg['duration']} seconds")
+        print(f"Frequency sweep: {chirp_cfg['f_start']} - {chirp_cfg['f_end']} Hz")
+        print(f"Expected samples: {int(expected_rate * chirp_cfg['duration'])}")
+        print(f"Motor CAN IDs: {self.motor_ids}")
         if self.ik_generators:
             print(f"IK groups: {list(self.ik_generators.keys())}")
         if self.direct_motors:
             print(f"Direct motors: {sorted(self.direct_motors)}")
-        print(f"Samples: {self.sample_count}")
-        print(f"Duration: {elapsed:.2f} seconds")
-        if rate_limited:
-            print(f"Requested rate: {expected_rate} Hz")
-        else:
-            print("Rate limiting: DISABLED")
-        print(f"Actual rate: {actual_rate:.1f} Hz")
-        label = "mock loop" if self.dry_run else "CAN round-trip"
-        print(f"Average loop time: {avg_loop_ms:.2f} ms ({label})")
+        print("=" * 60 + "\n")
 
-        if rate_limited and missed_deadlines > 0:
-            pct = (missed_deadlines / self.sample_count) * 100
-            print(f"⚠️  Missed deadlines: {missed_deadlines}/{self.sample_count} ({pct:.1f}%)")
+    def _start_motors(self) -> None:
+        for can_id in self.motor_ids:
+            self.controller.start_motor(can_id)
+            time.sleep(0.125)
+        print(f"Motors started: {self.motor_ids}")
+        time.sleep(1.0)
+
+    def _print_summary(self) -> None:
+        """Print identification summary."""
+        print("\n" + "=" * 60)
+        print("IDENTIFICATION COMPLETE")
+        print("=" * 60)
+
+        print(f"\nMotors: {self.motor_ids}")
+        if self.ik_generators:
+            print(f"IK groups: {list(self.ik_generators.keys())}")
+        if self.direct_motors:
+            print(f"Direct motors: {sorted(self.direct_motors)}")
+
+        print(f"\nSamples collected: {self.sample_count}")
+
+        # Feedback data summary
+        for mid in self.motor_ids:
+            fb_count = len(self.feedback_data.get(mid, []))
+            pct = (fb_count / self.sample_count * 100) if self.sample_count > 0 else 0
+            print(f"  Motor {mid}: {fb_count}/{self.sample_count} feedbacks ({pct:.1f}%)")
+
+        # Print detailed communication stats
+        if self.async_loop:
+            self.async_loop.print_stats()
 
     def save_results(self, output_file: str) -> None:
         """Save results as JSON."""
@@ -526,13 +740,24 @@ class SystemIdentification:
         from results import save_plots
         save_plots(self, output_dir)
 
+    def save_stats(self, output_file: str) -> None:
+        """Save communication statistics as JSON."""
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("w") as f:
+            json.dump(self.comm_stats, f, indent=2)
+
+        print(f"Communication stats saved to: {output_path}")
+
     def cleanup(self) -> None:
         """Stop all motors and close controller."""
         print("\nStopping motors...")
         try:
+            if self.async_loop:
+                self.async_loop.stop()
             self.controller.stop_all_motors()
             time.sleep(0.1)
         except Exception as e:
             print(f"Error stopping motors: {e}")
             self.controller.stop()
-

@@ -3,6 +3,7 @@ MuJoCo Motor Controller - UDP interface matching MotorCANController API.
 Communicates with MuJoCo simulation via UDP for system identification testing.
 """
 
+import os
 import socket
 import struct
 import sys
@@ -34,6 +35,7 @@ class MsgType(IntEnum):
     FEEDBACK = 7
     CONTROL_BATCH = 8  # Batched control for multiple motors
     FEEDBACK_BATCH = 9  # Batched feedback for multiple motors
+    PING = 10  # Request feedback without sending control
 
 
 # Message sizes
@@ -64,6 +66,11 @@ def pack_stop_motor(motor_id: int) -> bytes:
 
 def pack_stop_all() -> bytes:
     return struct.pack("<BB", MsgType.STOP_ALL, 0)
+
+
+def pack_ping_motor(motor_id: int) -> bytes:
+    """Pack ping request to get feedback without sending control"""
+    return struct.pack("<BB", MsgType.PING, motor_id)
 
 
 def unpack_feedback_msg(data: bytes) -> tuple[int, FeedbackData]:
@@ -139,6 +146,9 @@ class MujocoMotorController:
         self.config_callbacks: dict[int, Callable] = {}
         self.control_ack_callbacks: dict[int, Callable] = {}
 
+        # Thread configuration - detect main thread CPU for separation
+        self._main_cpu = self._get_main_cpu()
+
     def start(self) -> bool:
         """Start UDP communication"""
         if self.running:
@@ -157,13 +167,15 @@ class MujocoMotorController:
 
             self.running = True
 
-            # Start receive thread
+            # Start receive thread with proper configuration
             self.receive_thread = threading.Thread(
-                target=self._receive_loop, daemon=True
+                target=self._receive_loop, daemon=True, name="MujocoRecv"
             )
             self.receive_thread.start()
 
             print(f"[MujocoController] Started - send:{self.send_port} recv:{self.recv_port}")
+            if self._main_cpu is not None:
+                print(f"[MujocoController] Main on CPU {self._main_cpu}, recv thread separated")
             return True
 
         except Exception as e:
@@ -186,6 +198,9 @@ class MujocoMotorController:
 
     def _receive_loop(self) -> None:
         """Background thread for receiving feedback"""
+        # Configure thread to run on different CPU than main if possible
+        self._configure_receive_thread()
+
         while self.running and self.recv_socket:
             try:
                 data, _ = self.recv_socket.recvfrom(1024)
@@ -199,6 +214,36 @@ class MujocoMotorController:
             except Exception as e:
                 if self.running:
                     print(f"[MujocoController] Receive error: {e}")
+
+    def _get_main_cpu(self) -> int | None:
+        """Get the CPU main thread is pinned to, if any."""
+        if not sys.platform.startswith("linux"):
+            return None
+        try:
+            affinity = os.sched_getaffinity(0)
+            if len(affinity) == 1:
+                return next(iter(affinity))
+        except (OSError, AttributeError):
+            pass
+        return None
+
+    def _configure_receive_thread(self) -> None:
+        """Configure receive thread for optimal performance."""
+        if not sys.platform.startswith("linux"):
+            return
+
+        try:
+            # Get available CPUs
+            all_cpus = os.sched_getaffinity(0)
+
+            # If main is pinned to one CPU, use the others
+            if self._main_cpu is not None and len(all_cpus) > 1:
+                other_cpus = all_cpus - {self._main_cpu}
+                if other_cpus:
+                    os.sched_setaffinity(0, other_cpus)
+                    print(f"[MujocoController] Recv thread on CPUs: {other_cpus}")
+        except (OSError, PermissionError) as e:
+            print(f"[MujocoController] Could not set recv thread affinity: {e}")
 
     def _handle_message(self, data: bytes) -> None:
         """Handle received message from simulation"""
@@ -249,6 +294,10 @@ class MujocoMotorController:
     def stop_all_motors(self) -> None:
         """Stop all motors"""
         self._send(pack_stop_all())
+
+    def ping_motor(self, can_id: int) -> None:
+        """Ping motor to request feedback without sending control command"""
+        self._send(pack_ping_motor(can_id))
 
     def get_motor_configuration(self, can_id: int) -> None:
         """Request motor configuration"""

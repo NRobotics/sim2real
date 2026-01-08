@@ -253,6 +253,8 @@ def main() -> None:
 
             if args.save_json:
                 sysid.save_results(str(output_dir / "results.json"))
+                # Also save communication stats separately
+                sysid.save_stats(str(output_dir / "comm_stats.json"))
             if args.save_torch:
                 sysid.save_torch(str(output_dir / "results.pt"))
             if args.save_plots:

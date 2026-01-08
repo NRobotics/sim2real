@@ -1,260 +1,260 @@
 # System Identification for Robot Actuators
 
-A Python toolkit for performing system identification on robot actuators using frequency sweep (chirp) signals. This tool communicates with motor controllers over CAN bus to characterize actuator dynamics for sim-to-real transfer.
+A Python toolkit for performing system identification on robot actuators using frequency sweep (chirp) signals. Supports CAN bus hardware, MuJoCo simulation, and dry-run testing.
 
-## Overview
-
-System identification is crucial for accurate simulation of robot dynamics. This toolkit:
-
-- **Generates chirp signals** - Frequency sweeps from low to high frequencies to excite all dynamic modes
-- **Sends commands via CAN bus** - Communicates with motor controllers using the humanoid-protocol
-- **Collects feedback data** - Records position, velocity, effort, temperature, and more
-- **Analyzes results** - Computes transfer functions and visualizes motor response
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- Linux with SocketCAN support (for CAN bus communication)
-- CAN interface configured (e.g., `can0`)
-
-### Setup
-
-1. **Clone the repository with submodules:**
+## Quick Start
 
 ```bash
-git clone --recursive https://github.com/NRobotics/sim2real.git
-cd sim2real
+# 1. Test hardware connection first
+python scripts/hardware_test.py --mujoco
+
+# 2. Run system identification
+python scripts/system_identification.py --mujoco --save --save-plots
 ```
 
-If you already cloned without `--recursive`, initialize the submodules:
+## Features
+
+- **Chirp signal generation** - Frequency sweeps to excite all dynamic modes
+- **Multiple backends** - Real CAN hardware, MuJoCo simulation, or dry-run mock
+- **IK group support** - Control multiple motors via inverse kinematics (e.g., foot pitch/roll)
+- **Safety features** - Motor limits, ping-based position queries, smooth interpolation
+- **Async communication** - Decoupled command/feedback for high-rate control (500+ Hz)
+
+## Scripts
+
+### Hardware Test (`scripts/hardware_test.py`)
+
+Validate motor communication before running full identification:
 
 ```bash
-git submodule update --init --recursive
+# Test with MuJoCo simulation
+python scripts/hardware_test.py --mujoco
+
+# Test with mock controller (no hardware)
+python scripts/hardware_test.py --dry-run
+
+# Test real hardware
+python scripts/hardware_test.py
+
+# Test specific motors with verbose output
+python scripts/hardware_test.py --mujoco --motor-ids 0 1 2 -v
+
+# Skip certain tests
+python scripts/hardware_test.py --mujoco --skip timing
 ```
 
-2. **Create a virtual environment (recommended):**
+**Tests performed:**
+1. **Connection** - Verifies motors respond to config requests
+2. **Ping** - Validates `ping_motor()` returns position feedback
+3. **Command** - Sends hold-position command, verifies feedback
+4. **Timing** - Measures round-trip latency (100 samples)
+5. **Stress** - Prolonged async loop test (optional, use `--stress`)
+
+**Stress test options:**
+```bash
+# Run with stress test (5s at 100Hz)
+python scripts/hardware_test.py --mujoco --stress
+
+# Custom duration and rate
+python scripts/hardware_test.py --mujoco --stress --stress-duration 10 --stress-rate 200
+```
+
+The stress test measures:
+- Missed deadlines (target: <5%)
+- Feedback rate (target: >90%)
+- Latency statistics (target: <10ms avg)
+
+### System Identification (`scripts/system_identification.py`)
+
+Run the main identification:
 
 ```bash
-cd system_identification
-python -m venv .venv
-source .venv/bin/activate
+# MuJoCo simulation
+python scripts/system_identification.py --mujoco --save --save-plots
+
+# Dry-run (mock controller)
+python scripts/system_identification.py --dry-run --save
+
+# Real hardware
+python scripts/system_identification.py --save --save-plots
+
+# Custom config and motor IDs
+python scripts/system_identification.py -c my_config.json -m 0 1 2 --save
 ```
 
-3. **Install dependencies:**
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--config, -c` | Config file path (default: `config/config.json`) |
+| `--motor-ids, -m` | Motor IDs to test (default: from config) |
+| `--mujoco` | Use MuJoCo simulation |
+| `--dry-run` | Use mock controller |
+| `--save` | Save results to JSON and PyTorch files |
+| `--save-plots` | Generate and save plots |
 
-```bash
-# Install the humanoid-protocol package
-pip install -e ../ext/humanoid-protocol/python
+## Configuration
 
-# Install system identification package with dev dependencies
-pip install -e ".[dev]"
-```
-
-Or using requirements files:
-
-```bash
-pip install -e ../ext/humanoid-protocol/python
-pip install -r requirements.txt
-# For development:
-pip install -r requirements-dev.txt
-```
-
-### CAN Interface Setup
-
-Configure your CAN interface before running:
-
-```bash
-# For standard CAN (1 Mbps)
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can0 up
-
-# For CAN FD (with 5 Mbps data rate)
-sudo ip link set can0 type can bitrate 1000000 dbitrate 5000000 fd on
-sudo ip link set can0 up
-```
-
-## Usage
-
-### Running System Identification
-
-1. **Configure the test parameters** by editing `config.json`:
+Edit `config/config.json`:
 
 ```json
 {
-    "can_interface": {
-        "interface": "socketcan",
-        "channel": "can0",
-        "bitrate": 1000000,
-        "fd": true
-    },
-    "chirp": {
-        "f_start": 0.001,
-        "f_end": 5.0,
-        "duration": 60.0,
-        "amplitude": 1.0,
-        "sample_rate": 650.0,
-        "sweep_type": "linear"
-    },
-    "control_parameters": {
-        "velocity": 0.0,
-        "effort": 0.0,
-        "stiffness": 5.0,
-        "damping": 2.0
-    },
-    "motors": {
-        "0": {"amplitude_scale": 1.0, "offset": 0.0},
-        "1": {"amplitude_scale": 1.0, "offset": 0.0}
+  "can_interface": {
+    "interface": "socketcan",
+    "channel": "can0",
+    "bitrate": 1000000,
+    "fd": true
+  },
+  "mujoco": {
+    "host": "127.0.0.1",
+    "send_port": 5000,
+    "recv_port": 5001
+  },
+  "chirp": {
+    "f_start": 0.0,
+    "f_end": 1.0,
+    "duration": 20.0,
+    "sample_rate": 500.0,
+    "sweep_type": "linear"
+  },
+  "control_parameters": {
+    "velocity": 0.0,
+    "effort": 0.0,
+    "stiffness": 10.0,
+    "damping": 0.1
+  },
+  "interpolation_duration": 2.0,
+  "motor_ids": [0, 1, 2, 3, 4, 5],
+  "motors": {
+    "0": {
+      "name": "left_hip_pitch",
+      "scale": 0.5,
+      "direction": 1.0,
+      "bias": 0.0,
+      "limits": [-1.5, 1.5],
+      "control_parameters": {
+        "stiffness": 20.0,
+        "damping": 0.3
+      }
     }
+  },
+  "ik_groups": [
+    {
+      "name": "foot_0",
+      "ik_type": "foot",
+      "motor_ids": [4, 5],
+      "chirp": {
+        "scale_pitch": 0.2,
+        "scale_roll": 0.2
+      },
+      "limits": {
+        "4": [-3.0, 3.0],
+        "5": [-3.0, 3.0]
+      }
+    }
+  ]
 }
 ```
 
-2. **Run the identification:**
-
-```bash
-python system_identification.py --config config.json --output results.json
-```
-
-### Analyzing Results
-
-After collecting data, analyze and visualize the results:
-
-```bash
-# View all motors comparison
-python analyse.py results.json --all
-
-# View specific motor details
-python analyse.py results.json --motor 0
-
-# Save plots to file
-python analyse.py results.json --all --save motor_response.png
-
-# Print statistics only
-python analyse.py results.json --stats
-```
-
-## Configuration Options
-
-### CAN Interface
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `interface` | CAN interface type | `socketcan` |
-| `channel` | CAN channel name | `can0` |
-| `bitrate` | CAN bus bitrate | `1000000` |
-| `fd` | Enable CAN FD | `true` |
-
-### Chirp Signal
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `f_start` | Starting frequency (Hz) | `0.001` |
-| `f_end` | Ending frequency (Hz) | `5.0` |
-| `duration` | Sweep duration (seconds) | `60.0` |
-| `amplitude` | Signal amplitude (0-1, maps to ±2π rad) | `1.0` |
-| `sample_rate` | Command rate (Hz) | `650.0` |
-| `sweep_type` | `linear`, `logarithmic`, or `exponential` | `linear` |
-
-### Control Parameters
+### Key Parameters
 
 | Parameter | Description |
 |-----------|-------------|
-| `velocity` | Velocity feedforward |
-| `effort` | Effort feedforward |
-| `stiffness` | Position gain (Kp) |
-| `damping` | Velocity gain (Kd) |
+| `chirp.f_start/f_end` | Frequency sweep range (Hz) |
+| `chirp.duration` | Sweep duration (seconds) |
+| `chirp.sample_rate` | Command rate (Hz) |
+| `motors.*.scale` | Chirp amplitude (radians) |
+| `motors.*.bias` | Position offset (radians) |
+| `motors.*.limits` | Safety limits [min, max] (radians) |
+| `interpolation_duration` | Time to move to start/end positions |
 
-### Motor Configuration
+## Safety Features
 
-Each motor can have:
-- `amplitude_scale`: Scale factor for chirp amplitude (default: 1.0)
-- `offset`: Constant offset added to position command (default: 0.0)
+1. **Motor limits** - Commands are clamped to configured min/max positions
+2. **Ping-based queries** - Get current position without sending commands
+3. **Smooth interpolation** - Gradual movement to chirp start position
+4. **Connection check** - Script waits for motors before proceeding
+5. **Hold-position tests** - Hardware tests don't command arbitrary positions
 
-## Output Data
+## MuJoCo Simulation
 
-The results JSON file contains:
-
-- **config**: The configuration used for the test
-- **motor_configurations**: Hardware configuration read from each motor
-- **feedback_data**: Time series data per motor:
-  - `timestamp`: Time since start
-  - `angle`: Measured position
-  - `commanded_angle`: Commanded position
-  - `angle_error`: Tracking error
-  - `velocity`: Measured velocity
-  - `effort`: Applied torque/current
-  - `voltage`: Bus voltage
-  - `temp_motor`: Motor temperature
-  - `temp_pcb`: PCB temperature
-- **statistics**: Summary statistics
-
-## Development
-
-### Code Quality Tools
+Run with MuJoCo for testing without hardware:
 
 ```bash
-# Format code
-ruff format .
+# Terminal 1: Start simulation
+cd sim2real
+python -m hoku.hoku_mujoco
 
-# Lint and auto-fix
-ruff check --fix .
-
-# Type checking
-mypy system_identification.py analyse.py
-
-# Run all checks
-ruff format . && ruff check . && mypy .
+# Terminal 2: Run identification (waits for connection)
+python scripts/system_identification.py --mujoco --save --save-plots
 ```
 
-### Project Structure
+## Output
+
+Results are saved to `data/sysid_YYYYMMDD_HHMMSS/`:
+
+```
+data/sysid_20260108_171742/
+├── sysid_20260108_171742.json    # Raw data (JSON)
+├── sysid_20260108_171742.pt      # PyTorch tensor format
+├── comm_stats_20260108_171742.json
+└── plots/
+    ├── motor_0_20260108_171742.png
+    ├── motor_1_20260108_171742.png
+    └── foot_0_pitch_20260108_171742.png
+```
+
+## Project Structure
 
 ```
 system_identification/
-├── system_identification.py  # Main identification script
-├── analyse.py                # Analysis and visualization
-├── config.json               # Configuration file
-├── pyproject.toml            # Project metadata and tool config
-├── requirements.txt          # Production dependencies
-├── requirements-dev.txt      # Development dependencies
-└── README.md                 # This file
+├── config/
+│   └── config.json           # Configuration file
+├── data/                     # Output data directory
+├── scripts/
+│   ├── system_identification.py  # Main entry point
+│   ├── sysid.py                  # SystemIdentification class
+│   ├── hardware_test.py          # Hardware validation
+│   ├── test_modules.py           # Test implementations
+│   ├── async_loop.py             # Async control loop
+│   ├── chirp.py                  # Chirp generators
+│   ├── controllers.py            # Mock controllers
+│   ├── ik_registry.py            # Inverse kinematics
+│   ├── results.py                # Result saving
+│   └── analyse.py                # Analysis tools
+└── README.md
 ```
 
 ## Troubleshooting
 
-### CAN Interface Issues
+### No response from motors
 
 ```bash
-# Check CAN interface status
+# Check if MuJoCo is running
+python -m hoku.hoku_mujoco
+
+# For hardware, check CAN interface
 ip -details link show can0
-
-# Monitor CAN traffic
 candump can0
-
-# Reset CAN interface
-sudo ip link set can0 down
-sudo ip link set can0 up
 ```
 
-### Permission Issues
+### CAN Interface Setup
 
 ```bash
-# Add user to dialout group for serial access
-sudo usermod -a -G dialout $USER
+# Standard CAN (1 Mbps)
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
 
-# For CAN without sudo, add udev rules or capabilities
+# CAN FD (with 5 Mbps data rate)
+sudo ip link set can0 type can bitrate 1000000 dbitrate 5000000 fd on
+sudo ip link set can0 up
 ```
 
 ### Import Errors
 
-Ensure humanoid-protocol is properly installed:
-
 ```bash
-pip install -e ../ext/humanoid-protocol/python
+# Ensure humanoid-protocol is installed
+pip install -e humanoid-protocol/python
+
+# Test import
 python -c "from humanoid_messages.can import MotorCANController; print('OK')"
 ```
-
-## License
-
-MIT License - See LICENSE file for details.
-

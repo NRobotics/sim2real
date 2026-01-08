@@ -48,10 +48,15 @@ def save_json(sysid: SystemIdentification, output_file: str) -> None:
             "total_samples": sysid.sample_count,
             "duration": time.time() - sysid.start_time,
             "samples_per_motor": {
-                str(can_id): len(data) for can_id, data in sysid.feedback_data.items()
+                str(can_id): len(data)
+                for can_id, data in sysid.feedback_data.items()
             },
         },
     }
+
+    # Add communication statistics if available
+    if hasattr(sysid, "comm_stats") and sysid.comm_stats:
+        results["communication_stats"] = sysid.comm_stats
 
     # Add IK group info with FK
     if sysid.ik_generators:

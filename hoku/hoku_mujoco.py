@@ -376,6 +376,11 @@ class MujocoUDPServer:
                         state.enabled = False
                         state.target = None
 
+                elif msg_type == MsgType.PING:
+                    # Ping requests feedback without requiring motor enabled
+                    feedback = self._get_feedback(motor_id)
+                    self._send_feedback(motor_id, feedback)
+
             except BlockingIOError:
                 continue
             except Exception as e:
