@@ -2,7 +2,7 @@
 Motor controller implementations for system identification.
 
 Provides:
-- MockMotorCANController: Simulated controller for dry-run testing (async-compatible)
+- MockMotorCANController: Simulated controller for dry-run testing
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ class MockMotorCANController:
         """
         self._config_callbacks: dict[int, Callable] = {}
         self._feedback_callbacks: dict[int, Callable] = {}
+        self._ack_callbacks: dict[int, Callable] = {}
         self._latency_mean = latency_mean
         self._latency_std = latency_std
         self._drop_rate = drop_rate
@@ -56,14 +57,17 @@ class MockMotorCANController:
         # Background thread for delivering feedback
         self._running = False
         self._feedback_queue: list[tuple[float, int, FeedbackData]] = []
+        self._ack_queue: list[tuple[float, int]] = []
         self._queue_lock = threading.Lock()
         self._feedback_thread: threading.Thread | None = None
 
         # Thread configuration
         self._main_cpu = self._get_main_cpu()
 
-        print(f"[DRY-RUN] Mock CAN controller initialized")
-        print(f"[DRY-RUN]   Latency: {latency_mean*1000:.1f}ms ± {latency_std*1000:.1f}ms")
+        print("[DRY-RUN] Mock CAN controller initialized")
+        lat_ms = latency_mean * 1000
+        std_ms = latency_std * 1000
+        print(f"[DRY-RUN]   Latency: {lat_ms:.1f}ms ± {std_ms:.1f}ms")
         print(f"[DRY-RUN]   Drop rate: {drop_rate*100:.1f}%")
 
     def start(self) -> None:
@@ -85,35 +89,49 @@ class MockMotorCANController:
         print("[DRY-RUN] Mock CAN controller stopped")
 
     def _feedback_delivery_loop(self) -> None:
-        """Background thread that delivers feedback at scheduled times."""
-        # Configure thread to run on different CPU than main if possible
+        """Background thread that delivers feedback and ACKs."""
         self._configure_thread()
 
         while self._running:
             now = time.perf_counter()
-            to_deliver: list[tuple[int, FeedbackData]] = []
+            fb_to_deliver: list[tuple[int, FeedbackData]] = []
+            ack_to_deliver: list[int] = []
 
             with self._queue_lock:
                 # Find feedback ready to deliver
-                ready_indices = []
-                for i, (deliver_time, can_id, feedback) in enumerate(self._feedback_queue):
-                    if now >= deliver_time:
-                        to_deliver.append((can_id, feedback))
-                        ready_indices.append(i)
-
-                # Remove delivered items (reverse order to preserve indices)
-                for i in reversed(ready_indices):
+                ready = []
+                for i, (t, cid, fb) in enumerate(self._feedback_queue):
+                    if now >= t:
+                        fb_to_deliver.append((cid, fb))
+                        ready.append(i)
+                for i in reversed(ready):
                     self._feedback_queue.pop(i)
 
-            # Deliver feedback outside of lock
-            for can_id, feedback in to_deliver:
+                # Find ACKs ready to deliver
+                ready = []
+                for i, (t, cid) in enumerate(self._ack_queue):
+                    if now >= t:
+                        ack_to_deliver.append(cid)
+                        ready.append(i)
+                for i in reversed(ready):
+                    self._ack_queue.pop(i)
+
+            # Deliver feedback
+            for can_id, feedback in fb_to_deliver:
                 if can_id in self._feedback_callbacks:
                     try:
                         self._feedback_callbacks[can_id](can_id, feedback)
                     except Exception as e:
-                        print(f"[DRY-RUN] Callback error for motor {can_id}: {e}")
+                        print(f"[DRY-RUN] Callback error {can_id}: {e}")
 
-            # Small sleep to avoid busy-waiting
+            # Deliver ACKs
+            for can_id in ack_to_deliver:
+                if can_id in self._ack_callbacks:
+                    try:
+                        self._ack_callbacks[can_id](can_id)
+                    except Exception as e:
+                        print(f"[DRY-RUN] ACK error {can_id}: {e}")
+
             time.sleep(0.0001)
 
     def _get_main_cpu(self) -> int | None:
@@ -150,6 +168,10 @@ class MockMotorCANController:
         """Register feedback callback."""
         self._feedback_callbacks[can_id] = callback
 
+    def set_control_ack_callback(self, can_id: int, cb: Callable) -> None:
+        """Register control ACK callback (ping responses)."""
+        self._ack_callbacks[can_id] = cb
+
     def get_motor_configuration(self, can_id: int) -> None:
         """Simulate receiving motor configuration (immediate)."""
         if can_id in self._config_callbacks:
@@ -179,31 +201,21 @@ class MockMotorCANController:
 
     def ping_motor(self, can_id: int) -> None:
         """
-        Simulate pinging a motor to request feedback.
-        
-        Schedules feedback delivery after latency, same as send_kinematics.
+        Simulate pinging a motor.
+
+        Real hardware returns ACK (not feedback), so we schedule ACK.
         """
         if random.random() < self._drop_rate:
             return
 
-        # Generate mock feedback at current position (assume 0 if not tracked)
-        mock_feedback = FeedbackData(
-            angle=np.random.normal(0, 0.01),
-            velocity=np.random.normal(0, 0.1),
-            effort=np.random.normal(0, 0.05),
-            voltage=24.0 + np.random.normal(0, 0.1),
-            temp_motor=35.0 + np.random.normal(0, 1.0),
-            temp_pcb=30.0 + np.random.normal(0, 0.5),
-            flags=0,
-        )
-
-        latency = max(0.0001, np.random.normal(self._latency_mean, self._latency_std))
+        lat = np.random.normal(self._latency_mean, self._latency_std)
+        latency = max(0.0001, lat)
         deliver_time = time.perf_counter() + latency
 
         with self._queue_lock:
-            self._feedback_queue.append((deliver_time, can_id, mock_feedback))
+            self._ack_queue.append((deliver_time, can_id))
 
-    def send_kinematics_for_motor(self, can_id: int, control_data: ControlData) -> None:
+    def send_kinematics_for_motor(self, can_id: int, cmd: ControlData) -> None:
         """
         Simulate sending kinematics command.
 
@@ -216,9 +228,9 @@ class MockMotorCANController:
 
         # Generate mock feedback with realistic noise
         mock_feedback = FeedbackData(
-            angle=control_data.angle + np.random.normal(0, 0.01),
-            velocity=control_data.velocity + np.random.normal(0, 0.1),
-            effort=control_data.effort + np.random.normal(0, 0.05),
+            angle=cmd.angle + np.random.normal(0, 0.01),
+            velocity=cmd.velocity + np.random.normal(0, 0.1),
+            effort=cmd.effort + np.random.normal(0, 0.05),
             voltage=24.0 + np.random.normal(0, 0.1),
             temp_motor=35.0 + np.random.normal(0, 1.0),
             temp_pcb=30.0 + np.random.normal(0, 0.5),
@@ -226,7 +238,8 @@ class MockMotorCANController:
         )
 
         # Schedule feedback delivery with random latency
-        latency = max(0.0001, np.random.normal(self._latency_mean, self._latency_std))
+        lat = np.random.normal(self._latency_mean, self._latency_std)
+        latency = max(0.0001, lat)
         deliver_time = time.perf_counter() + latency
 
         with self._queue_lock:
@@ -244,6 +257,7 @@ class MockMotorCANControllerSync:
     def __init__(self, **kwargs):
         self._config_callbacks: dict = {}
         self._feedback_callbacks: dict = {}
+        self._ack_callbacks: dict = {}
         print("[DRY-RUN] Mock CAN controller (sync) initialized")
 
     def start(self) -> None:
@@ -257,6 +271,9 @@ class MockMotorCANControllerSync:
 
     def set_feedback_callback(self, can_id: int, callback: Callable) -> None:
         self._feedback_callbacks[can_id] = callback
+
+    def set_control_ack_callback(self, can_id: int, cb: Callable) -> None:
+        self._ack_callbacks[can_id] = cb
 
     def get_motor_configuration(self, can_id: int) -> None:
         if can_id in self._config_callbacks:
@@ -282,26 +299,17 @@ class MockMotorCANControllerSync:
         print(f"[DRY-RUN] Motor {can_id} stopped")
 
     def ping_motor(self, can_id: int) -> None:
-        """Immediate feedback delivery for ping (synchronous)."""
-        if can_id in self._feedback_callbacks:
-            mock_feedback = FeedbackData(
-                angle=np.random.normal(0, 0.01),
-                velocity=np.random.normal(0, 0.1),
-                effort=np.random.normal(0, 0.05),
-                voltage=24.0 + np.random.normal(0, 0.1),
-                temp_motor=35.0 + np.random.normal(0, 1.0),
-                temp_pcb=30.0 + np.random.normal(0, 0.5),
-                flags=0,
-            )
-            self._feedback_callbacks[can_id](can_id, mock_feedback)
+        """Immediate ACK delivery for ping (synchronous)."""
+        if can_id in self._ack_callbacks:
+            self._ack_callbacks[can_id](can_id)
 
-    def send_kinematics_for_motor(self, can_id: int, control_data: ControlData) -> None:
+    def send_kinematics_for_motor(self, can_id: int, cmd: ControlData) -> None:
         """Immediate feedback delivery (synchronous)."""
         if can_id in self._feedback_callbacks:
             mock_feedback = FeedbackData(
-                angle=control_data.angle + np.random.normal(0, 0.01),
-                velocity=control_data.velocity + np.random.normal(0, 0.1),
-                effort=control_data.effort + np.random.normal(0, 0.05),
+                angle=cmd.angle + np.random.normal(0, 0.01),
+                velocity=cmd.velocity + np.random.normal(0, 0.1),
+                effort=cmd.effort + np.random.normal(0, 0.05),
                 voltage=24.0 + np.random.normal(0, 0.1),
                 temp_motor=35.0 + np.random.normal(0, 1.0),
                 temp_pcb=30.0 + np.random.normal(0, 0.5),

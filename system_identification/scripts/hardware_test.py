@@ -86,8 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stress-rate",
         type=float,
-        default=100.0,
-        help="Stress test rate in Hz (default: 100)",
+        default=30.0,
+        help="Stress test rate in Hz (default: 30, USB-CAN limit)",
     )
     parser.add_argument(
         "--verbose", "-v",

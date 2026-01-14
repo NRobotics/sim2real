@@ -158,6 +158,7 @@ class MujocoUDPServer:
 
             config_data = ConfigurationData(
                 can_id=motor_id,
+                device_type=0,  # Simulated motor
                 inverse_direction=False,
                 endstop_alignment_inverse=False,
                 endstop_alignment_skip=True,
@@ -269,8 +270,8 @@ class MujocoUDPServer:
             velocity=velocity,
             effort=effort,
             voltage=24.0,
-            temp_motor=35.0,
-            temp_pcb=30.0,
+            temp_motor=35,
+            temp_pcb=30,
             flags=0,
         )
 
@@ -309,8 +310,8 @@ class MujocoUDPServer:
             velocity=velocity,
             effort=effort,
             voltage=24.0,
-            temp_motor=35.0,
-            temp_pcb=30.0,
+            temp_motor=35,
+            temp_pcb=30,
             flags=0,
         )
 

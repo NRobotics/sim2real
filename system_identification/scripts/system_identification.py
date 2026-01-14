@@ -139,6 +139,20 @@ Config file example:
         "--no-memlock", action="store_true",
         help="Disable memory locking"
     )
+    parser.add_argument(
+        "--busy-wait", action="store_true",
+        help="Use busy-wait for precise command timing (CPU intensive)"
+    )
+
+    # Verbosity
+    parser.add_argument(
+        "--verbose", "-v", type=int, choices=[0, 1, 2], default=1, metavar="LEVEL",
+        help="Verbosity level: 0=minimal, 1=normal (default), 2=detailed"
+    )
+    parser.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Minimal output (equivalent to --verbose 0)"
+    )
 
     # Info commands
     parser.add_argument(
@@ -152,6 +166,10 @@ Config file example:
     parser.add_argument(
         "--rt-info", action="store_true",
         help="Show real-time scheduling info and exit"
+    )
+    parser.add_argument(
+        "--check-rate", type=float, nargs="?", const=0.0, default=None, metavar="RATE",
+        help="Test achievable rate and exit. If RATE specified, tests that rate; otherwise uses config sample_rate"
     )
 
     return parser
@@ -204,6 +222,10 @@ def main() -> None:
     if args.save:
         args.save_json = args.save_plots = args.save_torch = True
 
+    # Handle quiet flag
+    if args.quiet:
+        args.verbose = 0
+
     # Handle info commands
     if handle_info_commands(args):
         return
@@ -233,10 +255,21 @@ def main() -> None:
         motor_ids=args.motors,
         dry_run=args.dry_run,
         use_mujoco=args.mujoco,
+        busy_wait=args.busy_wait,
+        verbosity=args.verbose,
     )
 
     try:
         sysid.setup()
+
+        # Handle --check-rate: run rate test only and exit
+        if args.check_rate is not None:
+            test_rate = args.check_rate if args.check_rate > 0 else sysid.config["chirp"]["sample_rate"]
+            print(f"\n=== Rate Check Mode ===")
+            print(f"Testing achievable rate at {test_rate} Hz...\n")
+            sysid.run_rate_check(target_rate=test_rate, duration=2.0)
+            return
+
         sysid.run_identification()
 
         # Save results
@@ -249,7 +282,14 @@ def main() -> None:
                 output_base = pkg_root / output_base
             output_dir = output_base / f"sysid_{timestamp}"
             output_dir.mkdir(parents=True, exist_ok=True)
-            print(f"\nOutput folder: {output_dir}")
+            if args.verbose >= 1:
+                print(f"\nOutput folder: {output_dir}")
+
+            # Save the config file used for this run
+            import shutil
+            shutil.copy2(config_path, output_dir / "config.json")
+            if args.verbose >= 2:
+                print(f"  Config saved: {output_dir / 'config.json'}")
 
             if args.save_json:
                 sysid.save_results(str(output_dir / "results.json"))
@@ -260,7 +300,8 @@ def main() -> None:
             if args.save_plots:
                 sysid.save_plots(str(output_dir / "plots"))
         else:
-            print("\nNo output saved (use --save to enable)")
+            if args.verbose >= 1:
+                print("\nNo output saved (use --save to enable)")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

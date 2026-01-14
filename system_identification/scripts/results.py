@@ -79,6 +79,17 @@ def save_json(sysid: SystemIdentification, output_file: str) -> None:
     if sysid.direct_motors:
         results["direct_motors"] = sorted(sysid.direct_motors)
 
+    # Add interpolation data if available and non-empty
+    if hasattr(sysid, "interpolation_data") and hasattr(sysid, "save_interpolation"):
+        interp_data = {}
+        for phase in ["start", "end"]:
+            if sysid.save_interpolation.get(phase, False):
+                phase_data = sysid.interpolation_data.get(phase, {})
+                if phase_data:
+                    interp_data[phase] = {str(k): list(v) for k, v in phase_data.items()}
+        if interp_data:
+            results["interpolation_data"] = interp_data
+
     with Path(output_file).open("w") as f:
         json.dump(results, f, indent=2)
 
@@ -86,6 +97,13 @@ def save_json(sysid: SystemIdentification, output_file: str) -> None:
     print(f"Motors identified: {sysid.motor_ids}")
     if sysid.ik_generators:
         print(f"IK groups: {list(sysid.ik_generators.keys())}")
+    if hasattr(sysid, "save_interpolation"):
+        if sysid.save_interpolation.get("start", False):
+            start_samples = sum(len(v) for v in sysid.interpolation_data.get("start", {}).values())
+            print(f"Interpolation data (start): {start_samples} samples")
+        if sysid.save_interpolation.get("end", False):
+            end_samples = sum(len(v) for v in sysid.interpolation_data.get("end", {}).values())
+            print(f"Interpolation data (end): {end_samples} samples")
     if sysid.direct_motors:
         print(f"Direct motors: {sorted(sysid.direct_motors)}")
 
@@ -183,10 +201,23 @@ def save_torch(sysid: SystemIdentification, output_file: str) -> None:
         data["joint_info"] = _build_joint_info(sysid)
         data["ik_groups"] = _build_ik_groups_info(sysid)
 
+    # Add interpolation data if available
+    if hasattr(sysid, "save_interpolation"):
+        any_save = any(sysid.save_interpolation.get(p, False) for p in ["start", "end"])
+        if any_save:
+            interp_tensors = _build_interpolation_tensors(sysid, torch)
+            if interp_tensors:
+                data["interpolation"] = interp_tensors
+
     torch.save(data, output_file)
     print(f"Torch data saved to: {output_file}")
     print(f"  Shape: time={tuple(time_data.shape)}, dof_pos={tuple(dof_pos.shape)}")
     print(f"  Joint IDs (column order): {sysid.motor_ids}")
+    if "interpolation" in data:
+        for phase in ["start", "end"]:
+            if phase in data["interpolation"]:
+                shape = tuple(data["interpolation"][phase]["dof_pos"].shape)
+                print(f"  Interpolation {phase}: {shape[0]} samples")
 
 
 def _build_joint_info(sysid: SystemIdentification) -> list[dict]:
@@ -223,6 +254,67 @@ def _build_ik_groups_info(sysid: SystemIdentification) -> dict:
             "column_indices": col_indices,
         }
     return ik_groups
+
+
+def _build_interpolation_tensors(sysid: SystemIdentification, torch) -> dict:
+    """Build torch tensors for interpolation phase data."""
+    result = {}
+
+    for phase in ["start", "end"]:
+        # Skip if save not enabled for this phase
+        if not sysid.save_interpolation.get(phase, False):
+            continue
+
+        phase_data = sysid.interpolation_data.get(phase, {})
+        if not phase_data:
+            continue
+
+        # Find common samples across all motors for this phase
+        sample_sets = [
+            {d["sample"] for d in phase_data.get(can_id, [])}
+            for can_id in sysid.motor_ids
+            if phase_data.get(can_id)
+        ]
+        if not sample_sets:
+            continue
+
+        common_samples = sorted(set.intersection(*sample_sets))
+        if not common_samples:
+            continue
+
+        num_samples = len(common_samples)
+        num_joints = len(sysid.motor_ids)
+
+        # Build lookup
+        lookups = {
+            can_id: {d["sample"]: d for d in phase_data.get(can_id, [])}
+            for can_id in sysid.motor_ids
+        }
+
+        # Create tensors
+        time_data = torch.zeros(num_samples)
+        dof_pos = torch.zeros(num_samples, num_joints)
+        des_dof_pos = torch.zeros(num_samples, num_joints)
+
+        for i, sample_idx in enumerate(common_samples):
+            first_motor = next(
+                (mid for mid in sysid.motor_ids if sample_idx in lookups.get(mid, {})),
+                sysid.motor_ids[0]
+            )
+            time_data[i] = lookups[first_motor][sample_idx]["time"]
+            for j, can_id in enumerate(sysid.motor_ids):
+                if sample_idx in lookups.get(can_id, {}):
+                    d = lookups[can_id][sample_idx]
+                    dof_pos[i, j] = d["angle"]
+                    des_dof_pos[i, j] = d["commanded_angle"]
+
+        result[phase] = {
+            "time": time_data,
+            "dof_pos": dof_pos,
+            "des_dof_pos": des_dof_pos,
+        }
+
+    return result
 
 
 def save_plots(sysid: SystemIdentification, output_dir: str) -> None:

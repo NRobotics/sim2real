@@ -1,8 +1,9 @@
 {
     "can_interface": {
-        "interface": "socketcan",
-        "channel": "can0",
+        "interface": "usbtingo",
+        "channel": null,
         "bitrate": 1000000,
+        "data_bitrate": 5000000,
         "fd": true
     },
     "mujoco": {
@@ -14,7 +15,7 @@
         "f_start": 0.0,
         "f_end": 1.0,
         "duration": 20.0,
-        "sample_rate": 500.0,
+        "sample_rate": 1000.0,
         "sweep_type": "linear",
         "rate_limit": true
     },
@@ -24,8 +25,23 @@
         "stiffness": 10.0,
         "damping": 0.1
     },
-    "interpolation_duration": 2.0,
-    "_comment_interpolation": "Duration [s] for smooth interpolation from zero to initial chirp position (start) and from final position back to zero (end). Default: 2.0s",
+    "interpolation": {
+        "start": {
+            "enabled": true,
+            "save": true,
+            "duration": 2.0,
+            "wait_before": 1.0,
+            "wait_after": 1.0
+        },
+        "end": {
+            "enabled": true,
+            "save": true,
+            "duration": 2.0,
+            "wait_before": 1.0,
+            "wait_after": 1.0
+        }
+    },
+    "_comment_interpolation": "Interpolation settings. 'enabled': skip if false, 'save': include phase data in output, 'duration': interp time [s], 'wait_before'/'wait_after': pause before/after interpolation [s]",
     "position_tolerance": 0.05,
     "_comment_position_tolerance": "Maximum angular error [rad] to consider motors 'reached' target position. Default: 0.05 rad (≈2.9°). Used for verifying initialization and finalization.",
     "motor_ids": [0, 1, 2, 3, 4, 5],

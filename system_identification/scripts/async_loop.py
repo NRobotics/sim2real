@@ -72,6 +72,7 @@ class AsyncControlLoop:
         motor_ids: list[int],
         target_rate: float,
         use_busy_wait: bool = False,
+        verbosity: int = 2,
     ):
         """
         Initialize async control loop.
@@ -81,12 +82,14 @@ class AsyncControlLoop:
             motor_ids: List of motor CAN IDs to control
             target_rate: Target command rate in Hz
             use_busy_wait: Use busy-wait for timing (more accurate but CPU intensive)
+            verbosity: Logging level (0=silent, 1=start/end only, 2=progress updates)
         """
         self.controller = controller
         self.motor_ids = motor_ids
         self.target_rate = target_rate
         self.target_period = 1.0 / target_rate
         self.use_busy_wait = use_busy_wait
+        self.verbosity = verbosity
 
         # State
         self.running = False
@@ -175,7 +178,7 @@ class AsyncControlLoop:
         get_progress: Callable[[], float] | None = None,
     ) -> None:
         """
-        Run the async control loop.
+        Run the async control loop until generate_control signals completion.
 
         Args:
             generate_control: Function that generates control commands.
@@ -184,17 +187,78 @@ class AsyncControlLoop:
             get_ik_inputs: Optional function returning current IK inputs per group
             get_progress: Optional function returning progress 0.0-1.0
         """
+        self._run_loop(
+            generate_control=generate_control,
+            get_commanded_angles=get_commanded_angles,
+            get_ik_inputs=get_ik_inputs,
+            get_progress=get_progress,
+            num_samples=None,
+            silent=False,
+        )
+
+    def run_for_samples(
+        self,
+        generate_control: Callable[[], dict[int, ControlData]],
+        get_commanded_angles: Callable[[], dict[int, float]],
+        num_samples: int,
+        get_ik_inputs: Callable[[], dict[str, dict[str, float]]] | None = None,
+        silent: bool = False,
+    ) -> None:
+        """
+        Run the async control loop for a fixed number of samples.
+
+        Args:
+            generate_control: Function that generates control commands.
+                Returns dict[motor_id, ControlData] (no is_complete flag)
+            get_commanded_angles: Function returning current commanded angles per motor
+            num_samples: Exact number of samples to collect
+            get_ik_inputs: Optional function returning current IK inputs per group
+            silent: If True, suppress startup logging
+        """
+        # Wrap generator to add is_complete flag
+        sample_counter = [0]
+
+        def wrapped_generate() -> tuple[dict[int, ControlData], bool]:
+            # Check completion BEFORE incrementing - signals complete on iteration AFTER last sample
+            # This ensures all num_samples are sent before the loop breaks
+            is_complete = sample_counter[0] >= num_samples
+            sample_counter[0] += 1
+            control = generate_control()
+            return control, is_complete
+
+        self._run_loop(
+            generate_control=wrapped_generate,
+            get_commanded_angles=get_commanded_angles,
+            get_ik_inputs=get_ik_inputs,
+            get_progress=lambda: sample_counter[0] / num_samples,
+            num_samples=num_samples,
+            silent=silent,
+        )
+
+    def _run_loop(
+        self,
+        generate_control: Callable[[], tuple[dict[int, ControlData], bool]],
+        get_commanded_angles: Callable[[], dict[int, float]],
+        get_ik_inputs: Callable[[], dict[str, dict[str, float]]] | None,
+        get_progress: Callable[[], float] | None,
+        num_samples: int | None,
+        silent: bool,
+    ) -> None:
+        """Internal loop implementation shared by run() and run_for_samples()."""
         self.running = True
         self.sample_count = 0
         self.start_time = time.perf_counter()
-        self.stats.start()
 
         last_send_time: float | None = None
         first_sample_done = False
 
-        print(f"\n[AsyncLoop] Starting at {self.target_rate} Hz")
-        print(f"[AsyncLoop] Target period: {self.target_period * 1000:.2f}ms")
-        print(f"[AsyncLoop] Busy-wait: {self.use_busy_wait}")
+        if self.verbosity >= 1 and not silent:
+            print(f"\n[AsyncLoop] Starting at {self.target_rate} Hz")
+            print(f"[AsyncLoop] Target period: {self.target_period * 1000:.2f}ms")
+            print(f"[AsyncLoop] Busy-wait: {self.use_busy_wait}")
+
+        # Start stats timer AFTER startup prints to get accurate elapsed time
+        self.stats.start()
 
         while self.running:
             cycle_start = time.perf_counter()
@@ -248,12 +312,13 @@ class AsyncControlLoop:
                 self.start_time = time.perf_counter()
                 first_sample_done = True
 
-            # Progress reporting
-            if self.sample_count % 100 == 0:
+            # Progress reporting (only at verbosity >= 2, and only for long runs)
+            if self.verbosity >= 2 and not silent and self.sample_count % 100 == 0:
                 self._report_progress(get_progress)
 
-        # Final check for missed feedbacks
-        self._check_final_feedback_status()
+        # Final check for missed feedbacks (only for non-silent runs)
+        if not silent:
+            self._check_final_feedback_status()
 
     def _accurate_sleep(
         self, sleep_time: float, last_send_time: float
@@ -316,17 +381,18 @@ class AsyncControlLoop:
         """Log final feedback status for each motor."""
         # Give a small window for final feedbacks to arrive
         time.sleep(0.05)
-        with self._feedback_lock:
-            for can_id in self.motor_ids:
-                motor_stats = self.stats.get_motor_stats(can_id)
-                sent = motor_stats["commands_sent"]
-                received = motor_stats["feedbacks_received"]
-                if sent > received:
-                    pct = (received / sent * 100) if sent > 0 else 0
-                    print(
-                        f"[AsyncLoop] Motor {can_id}: "
-                        f"{received}/{sent} feedbacks ({pct:.1f}%)"
-                    )
+        if self.verbosity >= 1:
+            with self._feedback_lock:
+                for can_id in self.motor_ids:
+                    motor_stats = self.stats.get_motor_stats(can_id)
+                    sent = motor_stats["commands_sent"]
+                    received = motor_stats["feedbacks_received"]
+                    if sent > received:
+                        pct = (received / sent * 100) if sent > 0 else 0
+                        print(
+                            f"[AsyncLoop] Motor {can_id}: "
+                            f"{received}/{sent} feedbacks ({pct:.1f}%)"
+                        )
 
     def stop(self) -> None:
         """Stop the control loop."""
@@ -354,6 +420,7 @@ class AsyncControlLoopBuilder:
         self._motor_ids = motor_ids
         self._target_rate = 100.0
         self._use_busy_wait = False
+        self._verbosity = 2
         self._ik_mapping: dict[int, tuple[str, int]] = {}
 
     def with_rate(self, rate: float) -> AsyncControlLoopBuilder:
@@ -364,6 +431,11 @@ class AsyncControlLoopBuilder:
     def with_busy_wait(self, enabled: bool = True) -> AsyncControlLoopBuilder:
         """Enable busy-wait for accurate timing."""
         self._use_busy_wait = enabled
+        return self
+
+    def with_verbosity(self, level: int) -> AsyncControlLoopBuilder:
+        """Set verbosity level (0=silent, 1=start/end only, 2=progress updates)."""
+        self._verbosity = level
         return self
 
     def with_ik_mapping(
@@ -380,6 +452,7 @@ class AsyncControlLoopBuilder:
             motor_ids=self._motor_ids,
             target_rate=self._target_rate,
             use_busy_wait=self._use_busy_wait,
+            verbosity=self._verbosity,
         )
         if self._ik_mapping:
             loop.set_ik_mapping(self._ik_mapping)
