@@ -130,6 +130,13 @@ class SystemIdentification:
         if self.verbosity >= level:
             print(msg)
 
+    def _is_controller_running(self) -> bool:
+        """Check if the controller is still connected and running."""
+        if self.dry_run or self.use_mujoco:
+            return True
+        # Check the running flag on the controller (like motor-test-rig does)
+        return hasattr(self.controller, 'running') and self.controller.running
+
     def _load_config(self, config_file: str) -> dict:
         with Path(config_file).open() as f:
             config = json.load(f)
@@ -211,7 +218,8 @@ class SystemIdentification:
 
         # Send zero stiffness/damping commands (passive mode)
         # This triggers feedback without applying any force
-        for can_id in self.motor_ids:
+        # Add inter-motor delay to prevent buffer overflow on remote CAN
+        for i, can_id in enumerate(self.motor_ids):
             ctrl = ControlData(
                 angle=0.0,  # Target doesn't matter with zero gains
                 velocity=0.0,
@@ -220,6 +228,9 @@ class SystemIdentification:
                 damping=0.0,
             )
             self.controller.send_kinematics_for_motor(can_id, ctrl)
+            # Small delay between motors to prevent buffer overflow
+            if i < len(self.motor_ids) - 1:
+                time.sleep(0.0005)  # 0.5ms delay
 
         # Wait for responses
         if not self._queries_received.wait(timeout=timeout):
@@ -393,15 +404,19 @@ class SystemIdentification:
             # Determine which sub-phase we're in
             if idx < wait_before_samples:
                 # Hold at start position
-                positions = start
+                positions = dict(start)  # Copy to avoid mutation
             elif idx < wait_before_samples + interp_samples:
-                # Interpolating
+                # Interpolating: alpha goes from 0 to 1 inclusive
                 interp_idx = idx - wait_before_samples
-                alpha = interp_idx / interp_samples if interp_samples > 0 else 1.0
+                # Ensure alpha reaches exactly 1.0 on last interpolation sample
+                if interp_samples <= 1:
+                    alpha = 1.0  # Single sample goes directly to target
+                else:
+                    alpha = interp_idx / (interp_samples - 1)
                 positions = self._angular_interpolation(start, target, alpha)
             else:
                 # Hold at target position
-                positions = target
+                positions = dict(target)  # Copy to avoid mutation
 
             # Build control data
             control_data: dict[int, ControlData] = {}
@@ -431,6 +446,9 @@ class SystemIdentification:
             .with_ik_mapping(self.motor_to_ik_group)
             .build()
         )
+        # Set start_time BEFORE registering callbacks to avoid race condition
+        # where early feedback gets recorded with start_time=0
+        interp_loop.start_time = time.perf_counter()
         interp_loop.register_callbacks()
         interp_loop.run_for_samples(
             generate_control=generate_interp_control,
@@ -488,7 +506,9 @@ class SystemIdentification:
         """Smoothly interpolate from current position back to zero."""
         self._log(1, "\n=== Finalization Phase ===")
 
+        # Use last commanded positions for smooth command continuity
         start = {can_id: self.commanded_angles.get(can_id, 0.0) for can_id in self.motor_ids}
+        self._log(2, f"  Last commanded positions: {start}")
         target = {can_id: 0.0 for can_id in self.motor_ids}
 
         if self.save_interpolation.get("end", False):
@@ -725,7 +745,9 @@ class SystemIdentification:
             ik_inputs, angles, complete = gen.get_next()
             if complete:
                 is_complete = True
-            self.commanded_ik_inputs[group_name] = ik_inputs
+            else:
+                # Only update commanded values during active chirp (not on completion)
+                self.commanded_ik_inputs[group_name] = ik_inputs
 
             group_motors = sorted(
                 [m for m, (g, _) in self.motor_to_ik_group.items() if g == group_name],
@@ -733,7 +755,9 @@ class SystemIdentification:
             )
             for i, mid in enumerate(group_motors):
                 if i < len(angles):
-                    self.commanded_angles[mid] = angles[i]
+                    if not complete:
+                        self.commanded_angles[mid] = angles[i]
+                    # Use current angle for control, but preserve last value in commanded_angles
                     safe_angle = self._clamp_angle(mid, angles[i])
                     params = self._get_control_params(mid)
                     control_data[mid] = ControlData(
@@ -751,7 +775,10 @@ class SystemIdentification:
             angle, complete = self.chirp_generators[can_id].get_next()
             if complete:
                 is_complete = True
-            self.commanded_angles[can_id] = angle
+            else:
+                # Only update commanded angle during active chirp (not on completion)
+                self.commanded_angles[can_id] = angle
+            # Use current angle for control, but preserve last value in commanded_angles
             safe_angle = self._clamp_angle(can_id, angle)
             params = self._get_control_params(can_id)
             control_data[can_id] = ControlData(
@@ -826,6 +853,11 @@ class SystemIdentification:
         target_period = 1.0 / target_rate
         commands_sent = 0
         missed_deadlines = 0
+        connection_lost = False
+
+        # Add inter-motor delay only at LOW rates where there's time budget
+        # (matching motor-test-rig: delay only when period > 5ms, i.e. rate < 200Hz)
+        inter_motor_delay = 0.0005 if target_period > 0.005 else 0.0
 
         start_time = time.perf_counter()
         next_deadline = start_time
@@ -837,8 +869,19 @@ class SystemIdentification:
             if elapsed >= duration:
                 break
 
-            # Send hold commands to all motors
-            for can_id in self.motor_ids:
+            # Check if controller is still running (detect connection loss)
+            if not self._is_controller_running():
+                connection_lost = True
+                self._log(1, "\n⚠ Connection lost during rate test")
+                break
+
+            # Send hold commands to all motors with inter-motor delay
+            for i, can_id in enumerate(self.motor_ids):
+                # Check connection before each send
+                if not self._is_controller_running():
+                    connection_lost = True
+                    break
+
                 angle = hold_positions.get(can_id, 0.0)
                 ctrl = ControlData(
                     angle=angle,
@@ -847,7 +890,21 @@ class SystemIdentification:
                     stiffness=params["stiffness"],
                     damping=params["damping"],
                 )
-                self.controller.send_kinematics_for_motor(can_id, ctrl)
+                try:
+                    self.controller.send_kinematics_for_motor(can_id, ctrl)
+                except CANBusError as e:
+                    if "not started" in str(e).lower():
+                        connection_lost = True
+                        self._log(1, f"\n⚠ Connection lost: {e}")
+                        break
+                    raise
+
+                # Add delay between motors to prevent buffer overflow
+                if inter_motor_delay > 0 and i < len(self.motor_ids) - 1:
+                    time.sleep(inter_motor_delay)
+
+            if connection_lost:
+                break
 
             commands_sent += 1
 
@@ -920,10 +977,14 @@ class SystemIdentification:
         self._log(1, f"\n  Command rate: {'✓ PASS' if cmd_rate_ok else '✗ FAIL'}")
         self._log(1, f"  Feedback rate: {'✓ PASS' if feedback_ok else '⚠ WARNING'}")
 
-        passed = cmd_rate_ok and all_motors_ok
+        passed = cmd_rate_ok and all_motors_ok and not connection_lost
         self._log(1, "=" * 60)
 
-        if not passed:
+        if connection_lost:
+            print("\n✗ Connection lost during rate test.")
+            print("  The rate may be too high for the remote CAN connection.")
+            print("  Try lowering sample_rate in config (400 Hz recommended for 6 motors)")
+        elif not passed:
             # Always show warnings
             print("\n⚠ Rate test showed potential issues.")
             print("  Consider: --busy-wait, --realtime, or lower sample_rate")
@@ -1165,14 +1226,33 @@ class SystemIdentification:
         self._log(2, f"Communication stats saved to: {output_path}")
 
     def cleanup(self) -> None:
-        """Stop all motors and close controller."""
+        """Stop all motors and close controller gracefully."""
         self._log(1, "\nStopping motors...")
         try:
             if self.async_loop:
                 self.async_loop.stop()
-            self.controller.stop_all_motors()
-            time.sleep(0.1)
-        except Exception as e:
-            # Always print errors
-            print(f"Error stopping motors: {e}")
+
+            # Send STOP to each motor individually (like motor-test-rig)
+            for can_id in self.motor_ids:
+                try:
+                    self._log(2, f"  Sending STOP to motor {can_id}...")
+                    self.controller.stop_motor(can_id)
+                except Exception as e:
+                    self._log(2, f"  Warning: Failed to stop motor {can_id}: {e}")
+
+            # Wait for stop commands to be processed
+            time.sleep(0.3)
+
+            # Gracefully stop the controller
+            self._log(2, "  Disconnecting from CAN bus...")
+            self.controller.running = False
+            time.sleep(0.2)  # Let receive loop notice running=False
             self.controller.stop()
+            self._log(1, "Motors stopped and CAN disconnected.")
+
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            try:
+                self.controller.stop()
+            except Exception:
+                pass

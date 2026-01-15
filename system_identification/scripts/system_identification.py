@@ -146,7 +146,7 @@ Config file example:
 
     # Verbosity
     parser.add_argument(
-        "--verbose", "-v", type=int, choices=[0, 1, 2], default=1, metavar="LEVEL",
+        "--verbose", "-v", type=int, choices=[0, 1, 2], default=2, metavar="LEVEL",
         help="Verbosity level: 0=minimal, 1=normal (default), 2=detailed"
     )
     parser.add_argument(
@@ -272,9 +272,18 @@ def main() -> None:
 
         sysid.run_identification()
 
-        # Save results
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    except Exception as e:
+        print(f"\nError: {e}")
+        traceback.print_exc()
+    finally:
+        # ALWAYS stop motors first (safety), then save data from memory
+        sysid.cleanup()
+
+        # Save results after motors stopped (data is in memory)
         any_saving = args.save_json or args.save_plots or args.save_torch
-        if any_saving:
+        if any_saving and sysid.sample_count > 0:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_base = Path(args.output)
             if not output_base.is_absolute():
@@ -293,23 +302,13 @@ def main() -> None:
 
             if args.save_json:
                 sysid.save_results(str(output_dir / "results.json"))
-                # Also save communication stats separately
                 sysid.save_stats(str(output_dir / "comm_stats.json"))
             if args.save_torch:
                 sysid.save_torch(str(output_dir / "results.pt"))
             if args.save_plots:
                 sysid.save_plots(str(output_dir / "plots"))
-        else:
-            if args.verbose >= 1:
-                print("\nNo output saved (use --save to enable)")
-
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-    except Exception as e:
-        print(f"\nError: {e}")
-        traceback.print_exc()
-    finally:
-        sysid.cleanup()
+        elif args.verbose >= 1 and not any_saving:
+            print("\nNo output saved (use --save to enable)")
 
 
 if __name__ == "__main__":

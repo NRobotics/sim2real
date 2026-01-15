@@ -1,7 +1,7 @@
 {
     "can_interface": {
-        "interface": "usbtingo",
-        "channel": null,
+        "interface": "remote",
+        "channel": "ws://192.168.12.100:54701/",
         "bitrate": 1000000,
         "data_bitrate": 5000000,
         "fd": true
@@ -14,8 +14,8 @@
     "chirp": {
         "f_start": 0.0,
         "f_end": 1.0,
-        "duration": 20.0,
-        "sample_rate": 1000.0,
+        "duration": 5.0,
+        "sample_rate": 200.0,
         "sweep_type": "linear",
         "rate_limit": true
     },
@@ -29,16 +29,16 @@
         "start": {
             "enabled": true,
             "save": true,
-            "duration": 2.0,
-            "wait_before": 1.0,
-            "wait_after": 1.0
+            "duration": 0.5,
+            "wait_before": 0.5,
+            "wait_after": 0.5
         },
         "end": {
             "enabled": true,
             "save": true,
-            "duration": 2.0,
-            "wait_before": 1.0,
-            "wait_after": 1.0
+            "duration": 0.5,
+            "wait_before": 0.5,
+            "wait_after": 0.5
         }
     },
     "_comment_interpolation": "Interpolation settings. 'enabled': skip if false, 'save': include phase data in output, 'duration': interp time [s], 'wait_before'/'wait_after': pause before/after interpolation [s]",

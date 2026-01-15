@@ -146,78 +146,179 @@ def _compute_fk(sysid: SystemIdentification, motor_ids: list[int], fk_func) -> l
 
 
 def save_torch(sysid: SystemIdentification, output_file: str) -> None:
-    """Save data in PyTorch .pt format (Isaac sim compatible)."""
+    """Save data in PyTorch .pt format.
+    
+    Saves TWO files:
+    - results.pt: Chirp phase only (for system ID)
+    - results_full.pt: All phases combined (start_interp + chirp + end_interp)
+    
+    Missing feedbacks are marked with NaN and tracked in 'valid_mask'.
+    """
     try:
         import torch
     except ImportError:
         print("Warning: PyTorch not installed, skipping .pt save")
         return
 
-    # Find common samples across all motors
-    sample_sets = [
-        {d["sample"] for d in sysid.feedback_data.get(can_id, [])}
-        for can_id in sysid.motor_ids
-        if sysid.feedback_data.get(can_id)
-    ]
-    if not sample_sets:
-        print("Warning: No feedback data to save")
-        return
-
-    common_samples = sorted(set.intersection(*sample_sets))
-    if not common_samples:
-        print("Warning: No common samples across motors")
-        return
-
-    num_samples = len(common_samples)
+    output_path = Path(output_file)
     num_joints = len(sysid.motor_ids)
 
-    # Build lookup
+    # === Save chirp-only data ===
+    num_samples = sysid.sample_count
+    chirp_data = None
+    if num_samples > 0:
+        chirp_data = _build_phase_tensors(
+            sysid, sysid.feedback_data, num_samples, "timestamp", torch
+        )
+        chirp_data["joint_ids"] = sysid.motor_ids
+        chirp_data["phase"] = "chirp"
+        if sysid.motor_to_ik_group:
+            chirp_data["joint_info"] = _build_joint_info(sysid)
+            chirp_data["ik_groups"] = _build_ik_groups_info(sysid)
+
+        torch.save(chirp_data, output_path)
+        _print_torch_summary("Chirp data", output_path, chirp_data, sysid.motor_ids)
+
+    # === Save full data (all phases combined) ===
+    full_path = output_path.with_name(
+        output_path.stem + "_full" + output_path.suffix
+    )
+    
+    # Collect all phases data
+    all_tensors: dict[str, list] = {
+        "time": [], "dof_pos": [], "des_dof_pos": [], "dof_vel": [], "dof_effort": [],
+        "dof_voltage": [], "dof_temp_motor": [], "dof_temp_pcb": [], "dof_flags": [],
+        "valid_mask": [], "phase_id": [],
+    }
+    phase_boundaries = {}
+    current_idx = 0
+
+    def _append_phase(tensors: dict, n: int, phase_id: int) -> None:
+        nonlocal current_idx
+        for key in all_tensors:
+            if key == "phase_id":
+                all_tensors[key].append(torch.full((n,), phase_id, dtype=torch.int8))
+            elif key in tensors:
+                all_tensors[key].append(tensors[key])
+
+    # Start interpolation
+    if hasattr(sysid, "save_interpolation") and sysid.save_interpolation.get("start"):
+        start_data = sysid.interpolation_data.get("start", {})
+        if start_data:
+            n = _get_phase_sample_count(start_data)
+            tensors = _build_phase_tensors(sysid, start_data, n, "timestamp", torch)
+            _append_phase(tensors, n, 0)  # 0 = start
+            phase_boundaries["start_interp"] = (current_idx, current_idx + n)
+            current_idx += n
+
+    # Chirp phase
+    if num_samples > 0:
+        _append_phase(chirp_data, num_samples, 1)  # 1 = chirp
+        phase_boundaries["chirp"] = (current_idx, current_idx + num_samples)
+        current_idx += num_samples
+
+    # End interpolation
+    if hasattr(sysid, "save_interpolation") and sysid.save_interpolation.get("end"):
+        end_data = sysid.interpolation_data.get("end", {})
+        if end_data:
+            n = _get_phase_sample_count(end_data)
+            tensors = _build_phase_tensors(sysid, end_data, n, "timestamp", torch)
+            _append_phase(tensors, n, 2)  # 2 = end
+            phase_boundaries["end_interp"] = (current_idx, current_idx + n)
+            current_idx += n
+
+    if all_tensors["time"]:
+        full_data = {
+            key: torch.cat(vals) for key, vals in all_tensors.items() if vals
+        }
+        full_data["phase_boundaries"] = phase_boundaries
+        full_data["joint_ids"] = sysid.motor_ids
+        if sysid.motor_to_ik_group:
+            full_data["joint_info"] = _build_joint_info(sysid)
+            full_data["ik_groups"] = _build_ik_groups_info(sysid)
+
+        torch.save(full_data, full_path)
+        _print_torch_summary("Full data", full_path, full_data, sysid.motor_ids)
+
+
+def _get_phase_sample_count(phase_data: dict) -> int:
+    """Get sample count from phase data dict."""
+    all_samples = set()
+    for data_list in phase_data.values():
+        for d in data_list:
+            all_samples.add(d["sample"])
+    return max(all_samples) + 1 if all_samples else 0
+
+
+def _build_phase_tensors(
+    sysid, data_dict: dict, num_samples: int, time_key: str, torch
+) -> dict:
+    """Build tensors for a single phase with all feedback data."""
+    num_joints = len(sysid.motor_ids)
+    
     lookups = {
-        can_id: {d["sample"]: d for d in sysid.feedback_data.get(can_id, [])}
+        can_id: {d["sample"]: d for d in data_dict.get(can_id, [])}
         for can_id in sysid.motor_ids
     }
 
-    # Create tensors
-    time_data = torch.zeros(num_samples)
-    dof_pos = torch.zeros(num_samples, num_joints)
-    des_dof_pos = torch.zeros(num_samples, num_joints)
+    # Core tensors
+    time_data = torch.full((num_samples,), float('nan'))
+    dof_pos = torch.full((num_samples, num_joints), float('nan'))
+    des_dof_pos = torch.full((num_samples, num_joints), float('nan'))
+    valid_mask = torch.zeros(num_samples, num_joints, dtype=torch.bool)
+    
+    # Additional feedback data
+    dof_vel = torch.full((num_samples, num_joints), float('nan'))
+    dof_effort = torch.full((num_samples, num_joints), float('nan'))
+    dof_voltage = torch.full((num_samples, num_joints), float('nan'))
+    dof_temp_motor = torch.full((num_samples, num_joints), float('nan'))
+    dof_temp_pcb = torch.full((num_samples, num_joints), float('nan'))
+    dof_flags = torch.zeros(num_samples, num_joints, dtype=torch.int32)
 
-    for i, sample_idx in enumerate(common_samples):
-        time_data[i] = lookups[sysid.motor_ids[0]][sample_idx]["timestamp"]
+    for i in range(num_samples):
+        for can_id in sysid.motor_ids:
+            if i in lookups[can_id]:
+                time_data[i] = lookups[can_id][i][time_key]
+                break
+
         for j, can_id in enumerate(sysid.motor_ids):
-            d = lookups[can_id][sample_idx]
-            dof_pos[i, j] = d["angle"]
-            des_dof_pos[i, j] = d["commanded_angle"]
+            if i in lookups[can_id]:
+                d = lookups[can_id][i]
+                dof_pos[i, j] = d["angle"]
+                des_dof_pos[i, j] = d["commanded_angle"]
+                dof_vel[i, j] = d.get("velocity", float('nan'))
+                dof_effort[i, j] = d.get("effort", float('nan'))
+                dof_voltage[i, j] = d.get("voltage", float('nan'))
+                dof_temp_motor[i, j] = d.get("temp_motor", float('nan'))
+                dof_temp_pcb[i, j] = d.get("temp_pcb", float('nan'))
+                dof_flags[i, j] = d.get("flags", 0)
+                valid_mask[i, j] = True
 
-    data = {
+    return {
         "time": time_data,
         "dof_pos": dof_pos,
         "des_dof_pos": des_dof_pos,
-        "joint_ids": sysid.motor_ids,
+        "dof_vel": dof_vel,
+        "dof_effort": dof_effort,
+        "dof_voltage": dof_voltage,
+        "dof_temp_motor": dof_temp_motor,
+        "dof_temp_pcb": dof_temp_pcb,
+        "dof_flags": dof_flags,
+        "valid_mask": valid_mask,
+        "num_expected_samples": num_samples,
     }
 
-    # Add IK metadata
-    if sysid.motor_to_ik_group:
-        data["joint_info"] = _build_joint_info(sysid)
-        data["ik_groups"] = _build_ik_groups_info(sysid)
 
-    # Add interpolation data if available
-    if hasattr(sysid, "save_interpolation"):
-        any_save = any(sysid.save_interpolation.get(p, False) for p in ["start", "end"])
-        if any_save:
-            interp_tensors = _build_interpolation_tensors(sysid, torch)
-            if interp_tensors:
-                data["interpolation"] = interp_tensors
-
-    torch.save(data, output_file)
-    print(f"Torch data saved to: {output_file}")
-    print(f"  Shape: time={tuple(time_data.shape)}, dof_pos={tuple(dof_pos.shape)}")
-    print(f"  Joint IDs (column order): {sysid.motor_ids}")
-    if "interpolation" in data:
-        for phase in ["start", "end"]:
-            if phase in data["interpolation"]:
-                shape = tuple(data["interpolation"][phase]["dof_pos"].shape)
-                print(f"  Interpolation {phase}: {shape[0]} samples")
+def _print_torch_summary(name: str, path: Path, data: dict, motor_ids: list):
+    """Print summary of saved torch data."""
+    print(f"\n{name} saved to: {path}")
+    print(f"  Shape: {tuple(data['dof_pos'].shape)}")
+    print(f"  Joint IDs: {motor_ids}")
+    valid_pct = data["valid_mask"].float().mean().item() * 100
+    print(f"  Valid: {valid_pct:.1f}%")
+    if "phase_boundaries" in data:
+        for phase, (start, end) in data["phase_boundaries"].items():
+            print(f"  {phase}: samples {start}-{end} ({end-start} samples)")
 
 
 def _build_joint_info(sysid: SystemIdentification) -> list[dict]:
@@ -256,69 +357,8 @@ def _build_ik_groups_info(sysid: SystemIdentification) -> dict:
     return ik_groups
 
 
-def _build_interpolation_tensors(sysid: SystemIdentification, torch) -> dict:
-    """Build torch tensors for interpolation phase data."""
-    result = {}
-
-    for phase in ["start", "end"]:
-        # Skip if save not enabled for this phase
-        if not sysid.save_interpolation.get(phase, False):
-            continue
-
-        phase_data = sysid.interpolation_data.get(phase, {})
-        if not phase_data:
-            continue
-
-        # Find common samples across all motors for this phase
-        sample_sets = [
-            {d["sample"] for d in phase_data.get(can_id, [])}
-            for can_id in sysid.motor_ids
-            if phase_data.get(can_id)
-        ]
-        if not sample_sets:
-            continue
-
-        common_samples = sorted(set.intersection(*sample_sets))
-        if not common_samples:
-            continue
-
-        num_samples = len(common_samples)
-        num_joints = len(sysid.motor_ids)
-
-        # Build lookup
-        lookups = {
-            can_id: {d["sample"]: d for d in phase_data.get(can_id, [])}
-            for can_id in sysid.motor_ids
-        }
-
-        # Create tensors
-        time_data = torch.zeros(num_samples)
-        dof_pos = torch.zeros(num_samples, num_joints)
-        des_dof_pos = torch.zeros(num_samples, num_joints)
-
-        for i, sample_idx in enumerate(common_samples):
-            first_motor = next(
-                (mid for mid in sysid.motor_ids if sample_idx in lookups.get(mid, {})),
-                sysid.motor_ids[0]
-            )
-            time_data[i] = lookups[first_motor][sample_idx]["time"]
-            for j, can_id in enumerate(sysid.motor_ids):
-                if sample_idx in lookups.get(can_id, {}):
-                    d = lookups[can_id][sample_idx]
-                    dof_pos[i, j] = d["angle"]
-                    des_dof_pos[i, j] = d["commanded_angle"]
-
-        result[phase] = {
-            "time": time_data,
-            "dof_pos": dof_pos,
-            "des_dof_pos": des_dof_pos,
-        }
-
-    return result
-
-
 def save_plots(sysid: SystemIdentification, output_dir: str) -> None:
-    """Save plots for each motor and IK group."""
+    """Save plots for each motor and IK group, including all phases."""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -337,24 +377,71 @@ def save_plots(sysid: SystemIdentification, output_dir: str) -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"\nSaving plots to {output_path}...")
 
-    # Motor plots
+    # Collect data from all phases for each motor
+    has_interp = hasattr(sysid, "interpolation_data")
+
     for can_id in sysid.motor_ids:
-        data = sysid.feedback_data.get(can_id, [])
-        if not data:
-            continue
+        plt.figure(figsize=(14, 6))
+        time_offset = 0.0
+        chirp_end = 0.0
 
-        times = [d["timestamp"] for d in data]
-        positions = [d["angle"] for d in data]
-        commanded = [d["commanded_angle"] for d in data]
+        # Get y-limits from config
+        limits = sysid.motor_limits.get(can_id)
+        if limits:
+            margin = (limits[1] - limits[0]) * 0.1
+            ylim = (limits[0] - margin, limits[1] + margin)
+        else:
+            ylim = None
 
-        plt.figure(figsize=(12, 6))
-        plt.plot(times, positions, label="Measured", linewidth=1)
-        plt.plot(times, commanded, label="Commanded", linestyle='dashed', linewidth=1)
-        plt.title(f"Motor {can_id} - Position Tracking")
+        # Start interpolation (if available)
+        if has_interp and sysid.save_interpolation.get("start"):
+            start_data = sysid.interpolation_data.get("start", {}).get(can_id, [])
+            if start_data:
+                # Filter out invalid timestamps (safety check)
+                max_valid_ts = 60.0
+                valid_data = [d for d in start_data if d["timestamp"] < max_valid_ts]
+                if valid_data:
+                    t = [d["timestamp"] for d in valid_data]
+                    pos = [d["angle"] for d in valid_data]
+                    cmd = [d["commanded_angle"] for d in valid_data]
+                    plt.axvspan(min(t), max(t), alpha=0.1, color='blue')
+                    plt.plot(t, pos, 'b-', linewidth=0.8, alpha=0.7)
+                    plt.plot(t, cmd, 'b--', linewidth=0.8, alpha=0.7)
+                    time_offset = max(t)
+
+        # Chirp phase (main data)
+        chirp_data = sysid.feedback_data.get(can_id, [])
+        if chirp_data:
+            t = [d["timestamp"] + time_offset for d in chirp_data]
+            pos = [d["angle"] for d in chirp_data]
+            cmd = [d["commanded_angle"] for d in chirp_data]
+            plt.plot(t, pos, 'g-', linewidth=1, label="Measured")
+            plt.plot(t, cmd, 'r--', linewidth=1, label="Commanded")
+            chirp_end = max(t) if t else time_offset
+
+        # End interpolation (if available)
+        if has_interp and sysid.save_interpolation.get("end"):
+            end_data = sysid.interpolation_data.get("end", {}).get(can_id, [])
+            if end_data:
+                # Filter out invalid timestamps (safety check for race condition)
+                max_valid_ts = 60.0  # Max expected interp duration
+                valid_data = [d for d in end_data if d["timestamp"] < max_valid_ts]
+                if valid_data:
+                    t = [d["timestamp"] + chirp_end for d in valid_data]
+                    pos = [d["angle"] for d in valid_data]
+                    cmd = [d["commanded_angle"] for d in valid_data]
+                    plt.axvspan(min(t), max(t), alpha=0.1, color='orange')
+                    plt.plot(t, pos, color='darkorange', linewidth=0.8, alpha=0.7)
+                    plt.plot(t, cmd, color='darkorange', linestyle='--',
+                             linewidth=0.8, alpha=0.7)
+
+        plt.title(f"Motor {can_id} - Position Tracking (all phases)")
         plt.xlabel("Time [s]")
         plt.ylabel("Position [rad]")
+        if ylim:
+            plt.ylim(ylim)
         plt.grid(True, alpha=0.3)
-        plt.legend()
+        plt.legend(loc='upper right')
         plt.tight_layout()
 
         plot_file = output_path / f"motor_{can_id}_{timestamp}.png"
@@ -362,7 +449,10 @@ def save_plots(sysid: SystemIdentification, output_dir: str) -> None:
         plt.close()
         print(f"  Saved: {plot_file.name}")
 
-    # FK plots for IK groups
+    # Additional feedback plots (velocity, effort, temperature) - all motors combined
+    _save_feedback_plots(sysid, output_path, timestamp, has_interp)
+
+    # FK plots for IK groups (all phases combined)
     for name, gen in sysid.ik_generators.items():
         if gen.ik_type != "foot":
             continue
@@ -371,55 +461,109 @@ def save_plots(sysid: SystemIdentification, output_dir: str) -> None:
         if len(motor_ids) != 2:
             continue
 
-        lower_data = sysid.feedback_data.get(motor_ids[0], [])
-        upper_data = sysid.feedback_data.get(motor_ids[1], [])
-        if not lower_data or not upper_data:
+        # Collect FK data from all phases
+        all_times, all_pitches, all_rolls = [], [], []
+        all_cmd_p, all_cmd_r = [], []
+        phase_markers = []  # (start_idx, end_idx, phase_name)
+
+        time_offset = 0.0
+        current_idx = 0
+
+        # Start interpolation
+        if has_interp and sysid.save_interpolation.get("start"):
+            t, p, r, cp, cr = _compute_fk_from_phase(
+                sysid.interpolation_data.get("start", {}),
+                motor_ids, fk_motor_to_foot, "timestamp"
+            )
+            if t:
+                all_times.extend([x + time_offset for x in t])
+                all_pitches.extend(p)
+                all_rolls.extend(r)
+                all_cmd_p.extend(cp)
+                all_cmd_r.extend(cr)
+                phase_markers.append((current_idx, current_idx + len(t), "start"))
+                current_idx += len(t)
+                time_offset = max(t) if t else 0.0
+
+        # Chirp phase
+        t, p, r, cp, cr = _compute_fk_from_phase(
+            sysid.feedback_data, motor_ids, fk_motor_to_foot, "timestamp"
+        )
+        if t:
+            all_times.extend([x + time_offset for x in t])
+            all_pitches.extend(p)
+            all_rolls.extend(r)
+            all_cmd_p.extend(cp)
+            all_cmd_r.extend(cr)
+            phase_markers.append((current_idx, current_idx + len(t), "chirp"))
+            current_idx += len(t)
+            chirp_end = max(t) + time_offset if t else time_offset
+        else:
+            chirp_end = time_offset
+
+        # End interpolation
+        if has_interp and sysid.save_interpolation.get("end"):
+            t, p, r, cp, cr = _compute_fk_from_phase(
+                sysid.interpolation_data.get("end", {}),
+                motor_ids, fk_motor_to_foot, "timestamp"
+            )
+            if t:
+                all_times.extend([x + chirp_end for x in t])
+                all_pitches.extend(p)
+                all_rolls.extend(r)
+                all_cmd_p.extend(cp)
+                all_cmd_r.extend(cr)
+                phase_markers.append((current_idx, current_idx + len(t), "end"))
+
+        if not all_times:
             continue
 
-        lower_by_sample = {d["sample"]: d for d in lower_data}
-        upper_by_sample = {d["sample"]: d for d in upper_data}
-        common = sorted(set(lower_by_sample.keys()) & set(upper_by_sample.keys()))
+        # Get IK limits from chirp config (scale determines amplitude)
+        ik_config = None
+        for grp in sysid.config.get("ik_groups", []):
+            if grp.get("name") == name:
+                ik_config = grp.get("chirp", {})
+                break
+        
+        pitch_scale = ik_config.get("scale_pitch", 0.3) if ik_config else 0.3
+        roll_scale = ik_config.get("scale_roll", 0.3) if ik_config else 0.3
+        pitch_margin = pitch_scale * 0.2
+        roll_margin = roll_scale * 0.2
 
-        times, pitches, rolls = [], [], []
-        cmd_pitches, cmd_rolls = [], []
-
-        for idx in common:
-            q_lower = lower_by_sample[idx]["angle"]
-            q_upper = upper_by_sample[idx]["angle"]
-            pitch, roll = fk_motor_to_foot(q_lower, q_upper)
-
-            times.append(lower_by_sample[idx]["timestamp"])
-            pitches.append(np.degrees(pitch))
-            rolls.append(np.degrees(roll))
-            cmd_p = lower_by_sample[idx].get("commanded_pitch")
-            cmd_r = lower_by_sample[idx].get("commanded_roll")
-            cmd_pitches.append(np.degrees(cmd_p) if cmd_p else 0.0)
-            cmd_rolls.append(np.degrees(cmd_r) if cmd_r else 0.0)
-
-        # Pitch plot
-        plt.figure(figsize=(12, 6))
-        plt.plot(times, pitches, label="Measured", linewidth=1)
-        plt.plot(times, cmd_pitches, label="Commanded", linestyle='dashed', linewidth=1)
-        plt.title(f"{name} - Pitch (FK)")
+        # Pitch plot (in radians)
+        plt.figure(figsize=(14, 6))
+        for start, end, phase in phase_markers:
+            color = {'start': 'blue', 'chirp': 'green', 'end': 'orange'}[phase]
+            alpha = 0.7 if phase != 'chirp' else 1.0
+            plt.plot(all_times[start:end], all_pitches[start:end],
+                     color=color, linewidth=0.8, alpha=alpha)
+            plt.plot(all_times[start:end], all_cmd_p[start:end],
+                     color=color, linestyle='--', linewidth=0.8, alpha=alpha)
+        plt.title(f"{name} - Pitch (FK, all phases)")
         plt.xlabel("Time [s]")
-        plt.ylabel("Pitch [deg]")
+        plt.ylabel("Pitch [rad]")
+        plt.ylim(-pitch_scale - pitch_margin, pitch_scale + pitch_margin)
         plt.grid(True, alpha=0.3)
-        plt.legend()
         plt.tight_layout()
         plot_file = output_path / f"{name}_pitch_{timestamp}.png"
         plt.savefig(plot_file, dpi=150)
         plt.close()
         print(f"  Saved: {plot_file.name}")
 
-        # Roll plot
-        plt.figure(figsize=(12, 6))
-        plt.plot(times, rolls, label="Measured", linewidth=1)
-        plt.plot(times, cmd_rolls, label="Commanded", linestyle='dashed', linewidth=1)
-        plt.title(f"{name} - Roll (FK)")
+        # Roll plot (in radians)
+        plt.figure(figsize=(14, 6))
+        for start, end, phase in phase_markers:
+            color = {'start': 'blue', 'chirp': 'green', 'end': 'orange'}[phase]
+            alpha = 0.7 if phase != 'chirp' else 1.0
+            plt.plot(all_times[start:end], all_rolls[start:end],
+                     color=color, linewidth=0.8, alpha=alpha)
+            plt.plot(all_times[start:end], all_cmd_r[start:end],
+                     color=color, linestyle='--', linewidth=0.8, alpha=alpha)
+        plt.title(f"{name} - Roll (FK, all phases)")
         plt.xlabel("Time [s]")
-        plt.ylabel("Roll [deg]")
+        plt.ylabel("Roll [rad]")
+        plt.ylim(-roll_scale - roll_margin, roll_scale + roll_margin)
         plt.grid(True, alpha=0.3)
-        plt.legend()
         plt.tight_layout()
         plot_file = output_path / f"{name}_roll_{timestamp}.png"
         plt.savefig(plot_file, dpi=150)
@@ -427,4 +571,114 @@ def save_plots(sysid: SystemIdentification, output_dir: str) -> None:
         print(f"  Saved: {plot_file.name}")
 
     print(f"Plots saved to: {output_path}")
+
+
+def _save_feedback_plots(
+    sysid, output_path: Path, timestamp: str, has_interp: bool
+) -> None:
+    """Save velocity, effort, voltage, and temperature plots for all motors."""
+    import matplotlib.pyplot as plt
+
+    # Collect data from all phases for each motor
+    def collect_phase_data(motor_data: dict, field: str) -> tuple[list, list, str]:
+        """Collect time and field data, return (times, values, color)."""
+        times, values = [], []
+        for d in motor_data:
+            if d.get("timestamp", 0) < 60.0:  # Filter invalid timestamps
+                times.append(d["timestamp"])
+                values.append(d.get(field, float('nan')))
+        return times, values
+
+    # Define plot configs: (field_name, ylabel, title_suffix)
+    plot_configs = [
+        ("velocity", "Velocity [rad/s]", "Velocity"),
+        ("effort", "Effort [A]", "Effort (Current)"),
+        ("voltage", "Voltage [V]", "Bus Voltage"),
+        ("temp_motor", "Temperature [°C]", "Motor Temperature"),
+        ("temp_pcb", "Temperature [°C]", "PCB Temperature"),
+    ]
+
+    for field, ylabel, title in plot_configs:
+        plt.figure(figsize=(14, 6))
+        time_offset = 0.0
+        chirp_end = 0.0
+        colors = plt.cm.tab10.colors
+
+        for idx, can_id in enumerate(sysid.motor_ids):
+            color = colors[idx % len(colors)]
+            motor_times, motor_values = [], []
+
+            # Start interpolation
+            if has_interp and sysid.save_interpolation.get("start"):
+                start_data = sysid.interpolation_data.get("start", {}).get(can_id, [])
+                if start_data:
+                    t, v = collect_phase_data(start_data, field)
+                    if t:
+                        motor_times.extend(t)
+                        motor_values.extend(v)
+                        time_offset = max(t) if t else 0.0
+
+            # Chirp phase
+            chirp_data = sysid.feedback_data.get(can_id, [])
+            if chirp_data:
+                t, v = collect_phase_data(chirp_data, field)
+                if t:
+                    motor_times.extend([x + time_offset for x in t])
+                    motor_values.extend(v)
+                    chirp_end = max(t) + time_offset if t else time_offset
+
+            # End interpolation
+            if has_interp and sysid.save_interpolation.get("end"):
+                end_data = sysid.interpolation_data.get("end", {}).get(can_id, [])
+                if end_data:
+                    t, v = collect_phase_data(end_data, field)
+                    if t:
+                        motor_times.extend([x + chirp_end for x in t])
+                        motor_values.extend(v)
+
+            if motor_times:
+                plt.plot(motor_times, motor_values, color=color, linewidth=0.8,
+                         alpha=0.8, label=f"Motor {can_id}")
+
+        plt.title(f"All Motors - {title}")
+        plt.xlabel("Time [s]")
+        plt.ylabel(ylabel)
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='upper right', fontsize='small', ncol=2)
+        plt.tight_layout()
+
+        plot_file = output_path / f"all_{field}_{timestamp}.png"
+        plt.savefig(plot_file, dpi=150)
+        plt.close()
+        print(f"  Saved: {plot_file.name}")
+
+
+def _compute_fk_from_phase(
+    phase_data: dict, motor_ids: list, fk_func, time_key: str
+) -> tuple:
+    """Compute FK from phase data. Returns (times, pitches, rolls, cmd_p, cmd_r) in radians."""
+    lower_data = phase_data.get(motor_ids[0], [])
+    upper_data = phase_data.get(motor_ids[1], [])
+    if not lower_data or not upper_data:
+        return [], [], [], [], []
+
+    lower_by_sample = {d["sample"]: d for d in lower_data}
+    upper_by_sample = {d["sample"]: d for d in upper_data}
+    common = sorted(set(lower_by_sample.keys()) & set(upper_by_sample.keys()))
+
+    times, pitches, rolls, cmd_p, cmd_r = [], [], [], [], []
+    for idx in common:
+        q_lower = lower_by_sample[idx]["angle"]
+        q_upper = upper_by_sample[idx]["angle"]
+        pitch, roll = fk_func(q_lower, q_upper)
+
+        times.append(lower_by_sample[idx][time_key])
+        pitches.append(pitch)  # Keep in radians
+        rolls.append(roll)  # Keep in radians
+        cp = lower_by_sample[idx].get("commanded_pitch")
+        cr = lower_by_sample[idx].get("commanded_roll")
+        cmd_p.append(cp if cp else 0.0)  # Keep in radians
+        cmd_r.append(cr if cr else 0.0)  # Keep in radians
+
+    return times, pitches, rolls, cmd_p, cmd_r
 

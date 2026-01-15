@@ -280,10 +280,17 @@ class AsyncControlLoop:
             self._cycle_deadline = cycle_start + self.target_period
 
             # Send commands to all motors
+            # Add inter-motor delay only at LOW rates (period > 5ms, rate < 200Hz)
+            # matching motor-test-rig behavior
             send_start = time.perf_counter()
-            for can_id, data in control_data.items():
+            motor_items = list(control_data.items())
+            inter_motor_delay = 0.0005 if self.target_period > 0.005 else 0.0
+            for i, (can_id, data) in enumerate(motor_items):
                 self.stats.record_command_sent(can_id, send_start)
                 self.controller.send_kinematics_for_motor(can_id, data)
+                # Add delay between motors (not after last one)
+                if inter_motor_delay > 0 and i < len(motor_items) - 1:
+                    time.sleep(inter_motor_delay)
             send_time = time.perf_counter() - send_start
             self.stats.record_send_time(send_time)
 
