@@ -1,4 +1,4 @@
 [submodule "humanoid-protocol"]
 	path = humanoid-protocol
 	url = https://github.com/NRobotics/humanoid-protocol
-	branch = main
+	branch = azhar
