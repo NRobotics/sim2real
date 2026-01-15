@@ -51,6 +51,7 @@ dmypy.json
 # Project specific
 *.json
 !config.json
+!config_*.json
 !pyproject.toml
 results/
 *.png

@@ -27,6 +27,7 @@ if str(_script_dir) not in sys.path:
 
 # Initialize IK registry
 from ik_registry import IKRegistry, register_default_ik_functions
+
 register_default_ik_functions()
 
 # Optional real-time scheduling
@@ -86,90 +87,123 @@ Config file example:
 
     # Motor selection
     parser.add_argument(
-        "--motors", "-m", type=int, nargs="+", metavar="CAN_ID",
-        help="Motor CAN IDs to identify (overrides config file)"
+        "--motors",
+        "-m",
+        type=int,
+        nargs="+",
+        metavar="CAN_ID",
+        help="Motor CAN IDs to identify (overrides config file)",
     )
     parser.add_argument(
-        "--config", "-c", type=str, default="config.json",
-        help="Configuration file (JSON)"
+        "--config",
+        "-c",
+        type=str,
+        default="config.json",
+        help="Configuration file (JSON)",
     )
 
     # Output
     parser.add_argument(
-        "--output", "-o", type=str, default="data",
-        help="Output directory for results"
+        "--output", "-o", type=str, default="data", help="Output directory for results"
     )
     parser.add_argument(
-        "--save", "-s", action=argparse.BooleanOptionalAction, default=False,
-        help="Save ALL results (JSON, plots, PyTorch)"
+        "--save",
+        "-s",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save ALL results (JSON, plots, PyTorch)",
     )
     parser.add_argument(
-        "--save-json", action=argparse.BooleanOptionalAction, default=False,
-        help="Save results to JSON"
+        "--save-json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save results to JSON",
     )
     parser.add_argument(
-        "--save-plots", action=argparse.BooleanOptionalAction, default=False,
-        help="Save plots for each motor"
+        "--save-plots",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save plots for each motor",
     )
     parser.add_argument(
-        "--save-torch", action=argparse.BooleanOptionalAction, default=False,
-        help="Save data in PyTorch .pt format"
+        "--save-torch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save data in PyTorch .pt format",
     )
 
     # Mode selection
     parser.add_argument(
-        "--dry-run", "-d", action="store_true",
-        help="Run without hardware (mock controller)"
+        "--dry-run",
+        "-d",
+        action="store_true",
+        help="Run without hardware (mock controller)",
     )
     parser.add_argument(
-        "--mujoco", action="store_true",
-        help="Use MuJoCo simulation (start sim first)"
+        "--mujoco", action="store_true", help="Use MuJoCo simulation (start sim first)"
     )
 
     # Real-time scheduling
     parser.add_argument(
-        "--realtime", type=int, nargs="?", const=90, default=0, metavar="PRIORITY",
-        help="Enable RT scheduling (SCHED_FIFO, default priority: 90)"
+        "--realtime",
+        type=int,
+        nargs="?",
+        const=90,
+        default=0,
+        metavar="PRIORITY",
+        help="Enable RT scheduling (SCHED_FIFO, default priority: 90)",
     )
     parser.add_argument(
-        "--cpu", type=int, default=None, metavar="CORE",
-        help="Pin process to specific CPU core"
+        "--cpu",
+        type=int,
+        default=None,
+        metavar="CORE",
+        help="Pin process to specific CPU core",
     )
     parser.add_argument(
-        "--no-memlock", action="store_true",
-        help="Disable memory locking"
+        "--no-memlock", action="store_true", help="Disable memory locking"
     )
     parser.add_argument(
-        "--busy-wait", action="store_true",
-        help="Use busy-wait for precise command timing (CPU intensive)"
+        "--busy-wait",
+        action="store_true",
+        help="Use busy-wait for precise command timing (CPU intensive)",
     )
 
     # Verbosity
     parser.add_argument(
-        "--verbose", "-v", type=int, choices=[0, 1, 2], default=2, metavar="LEVEL",
-        help="Verbosity level: 0=minimal, 1=normal (default), 2=detailed"
+        "--verbose",
+        "-v",
+        type=int,
+        choices=[0, 1, 2],
+        default=2,
+        metavar="LEVEL",
+        help="Verbosity level: 0=minimal, 1=normal (default), 2=detailed",
     )
     parser.add_argument(
-        "--quiet", "-q", action="store_true",
-        help="Minimal output (equivalent to --verbose 0)"
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Minimal output (equivalent to --verbose 0)",
     )
 
     # Info commands
     parser.add_argument(
-        "--list-motors", action="store_true",
-        help="List motor IDs from config and exit"
+        "--list-motors", action="store_true", help="List motor IDs from config and exit"
     )
     parser.add_argument(
-        "--list-ik", action="store_true",
-        help="List available IK functions and exit"
+        "--list-ik", action="store_true", help="List available IK functions and exit"
     )
     parser.add_argument(
-        "--rt-info", action="store_true",
-        help="Show real-time scheduling info and exit"
+        "--rt-info", action="store_true", help="Show real-time scheduling info and exit"
     )
     parser.add_argument(
-        "--check-rate", type=float, nargs="?", const=0.0, default=None, metavar="RATE",
-        help="Test achievable rate and exit. If RATE specified, tests that rate; otherwise uses config sample_rate"
+        "--check-rate",
+        type=float,
+        nargs="?",
+        const=0.0,
+        default=None,
+        metavar="RATE",
+        help="Test achievable rate and exit. If RATE specified, tests that rate; otherwise uses config sample_rate",
     )
 
     return parser
@@ -181,8 +215,10 @@ def handle_info_commands(args) -> bool:
         print("Available IK functions:")
         for name in IKRegistry.list_available():
             info = IKRegistry.get(name)
-            print(f"  {name}: inputs={info['input_names']}, "
-                  f"motors={info['motor_count']}")
+            print(
+                f"  {name}: inputs={info['input_names']}, "
+                f"motors={info['motor_count']}"
+            )
         return True
 
     if args.rt_info:
@@ -264,7 +300,11 @@ def main() -> None:
 
         # Handle --check-rate: run rate test only and exit
         if args.check_rate is not None:
-            test_rate = args.check_rate if args.check_rate > 0 else sysid.config["chirp"]["sample_rate"]
+            test_rate = (
+                args.check_rate
+                if args.check_rate > 0
+                else sysid.config["chirp"]["sample_rate"]
+            )
             print(f"\n=== Rate Check Mode ===")
             print(f"Testing achievable rate at {test_rate} Hz...\n")
             sysid.run_rate_check(target_rate=test_rate, duration=2.0)
@@ -289,13 +329,15 @@ def main() -> None:
             if not output_base.is_absolute():
                 pkg_root = Path(__file__).resolve().parent.parent
                 output_base = pkg_root / output_base
-            output_dir = output_base / f"sysid_{timestamp}"
+            config_name = config_path.stem
+            output_dir = output_base / f"sysid_{config_name}_{timestamp}"
             output_dir.mkdir(parents=True, exist_ok=True)
             if args.verbose >= 1:
                 print(f"\nOutput folder: {output_dir}")
 
             # Save the config file used for this run
             import shutil
+
             shutil.copy2(config_path, output_dir / "config.json")
             if args.verbose >= 2:
                 print(f"  Config saved: {output_dir / 'config.json'}")

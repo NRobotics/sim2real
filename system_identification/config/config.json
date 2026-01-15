@@ -14,7 +14,7 @@
     "chirp": {
         "f_start": 0.0,
         "f_end": 2.0,
-        "duration": 10.0,
+        "duration": 20.0,
         "sample_rate": 200.0,
         "sweep_type": "linear",
         "rate_limit": true
@@ -71,8 +71,8 @@
             "control_parameters": {
                 "velocity": 0.0,
                 "effort": 0.0,
-                "stiffness": 20.0,
-                "damping": 0.3
+                "stiffness": 40.0,
+                "damping": 0.8
             }
         },
         "1": {

@@ -1,0 +1,69 @@
+{
+    "can_interface": {
+        "interface": "remote",
+        "channel": "ws://192.168.12.100:54701/",
+        "bitrate": 1000000,
+        "data_bitrate": 5000000,
+        "fd": true
+    },
+    "mujoco": {
+        "host": "127.0.0.1",
+        "send_port": 5000,
+        "recv_port": 5001
+    },
+    "chirp": {
+        "f_start": 0.0,
+        "f_end": 2.0,
+        "duration": 5.0,
+        "sample_rate": 200.0,
+        "sweep_type": "linear",
+        "rate_limit": true
+    },
+    "control_parameters": {
+        "velocity": 0.0,
+        "effort": 0.0,
+        "stiffness": 5.0,
+        "damping": 0.05
+    },
+    "interpolation": {
+        "start": {
+            "enabled": true,
+            "save": true,
+            "method": "linear",
+            "duration": 1.0,
+            "wait_before": 0.5,
+            "wait_after": 0.5
+        },
+        "end": {
+            "enabled": true,
+            "save": true,
+            "method": "cubic_hermite",
+            "duration": 1.0,
+            "wait_before": 0.0,
+            "wait_after": 1.0
+        }
+    },
+    "position_tolerance": 0.05,
+    "motor_ids": [
+        1
+    ],
+    "motors": {
+        "1": {
+            "name": "small_one",
+            "scale": 0.5,
+            "direction": 1.0,
+            "bias": 0.0,
+            "limits": [
+                -1.57,
+                1.57
+            ],
+            "control_parameters": {
+                "velocity": 0.0,
+                "effort": 0.0,
+                "stiffness": 8.0,
+                "damping": 0.1
+            }
+        }
+    },
+    "ik_groups": []
+}
