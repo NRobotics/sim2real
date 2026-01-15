@@ -38,6 +38,11 @@ from async_loop import AsyncControlLoop, AsyncControlLoopBuilder, busy_sleep
 from chirp import ChirpGenerator, IKChirpGenerator
 from controllers import MockMotorCANController
 from ik_registry import IKRegistry
+from interpolation import (
+    get_easing_function,
+    EasingFunction,
+    cubic_hermite_spline,
+)
 
 if TYPE_CHECKING:
     from typing import Any
@@ -45,6 +50,7 @@ if TYPE_CHECKING:
 # Optional MuJoCo controller
 try:
     from hoku.mujoco_controller import MujocoMotorController
+
     MUJOCO_AVAILABLE = True
 except ImportError:
     _ws_root = Path(__file__).resolve().parent.parent.parent
@@ -52,6 +58,7 @@ except ImportError:
         sys.path.insert(0, str(_ws_root))
     try:
         from hoku.mujoco_controller import MujocoMotorController
+
         MUJOCO_AVAILABLE = True
     except ImportError:
         MUJOCO_AVAILABLE = False
@@ -108,8 +115,9 @@ class SystemIdentification:
         self.async_loop: AsyncControlLoop | None = None
         self.comm_stats: dict[str, Any] = {}
 
-        # Position tracking for feedback-based queries
+        # Position and velocity tracking for feedback-based queries
         self._current_positions: dict[int, float] = {}
+        self._current_velocities: dict[int, float] = {}
         self._positions_lock = threading.Lock()
         self._pending_queries: set[int] = set()
         self._queries_received = threading.Event()
@@ -135,7 +143,7 @@ class SystemIdentification:
         if self.dry_run or self.use_mujoco:
             return True
         # Check the running flag on the controller (like motor-test-rig does)
-        return hasattr(self.controller, 'running') and self.controller.running
+        return hasattr(self.controller, "running") and self.controller.running
 
     def _load_config(self, config_file: str) -> dict:
         with Path(config_file).open() as f:
@@ -186,9 +194,10 @@ class SystemIdentification:
             self.config_received.set()
 
     def _query_feedback_callback(self, can_id: int, feedback: Any) -> None:
-        """Callback for position query - updates current positions."""
+        """Callback for position query - updates current positions and velocities."""
         with self._positions_lock:
             self._current_positions[can_id] = feedback.angle
+            self._current_velocities[can_id] = getattr(feedback, "velocity", 0.0)
             self._pending_queries.discard(can_id)
             if not self._pending_queries:
                 self._queries_received.set()
@@ -258,15 +267,75 @@ class SystemIdentification:
         start: dict[int, float],
         target: dict[int, float],
         alpha: float,
+        easing_fn: EasingFunction | None = None,
     ) -> dict[int, float]:
-        """Interpolate between angles using shortest angular path."""
+        """
+        Interpolate between angles using shortest angular path.
+
+        Args:
+            start: Starting positions per motor
+            target: Target positions per motor
+            alpha: Raw interpolation parameter in [0, 1]
+            easing_fn: Optional easing function to smooth the motion
+
+        Returns:
+            Interpolated positions per motor
+        """
+        # Apply easing to alpha for smooth motion profiles
+        eased_alpha = easing_fn(alpha) if easing_fn else alpha
+
         result = {}
         for can_id in target:
             s = start.get(can_id, self._current_positions.get(can_id, 0.0))
             t = target[can_id]
             # Wrap difference to [-π, π] for shortest path
             diff = (t - s + np.pi) % (2 * np.pi) - np.pi
-            result[can_id] = s + diff * alpha
+            result[can_id] = s + diff * eased_alpha
+        return result
+
+    def _hermite_interpolation(
+        self,
+        start: dict[int, float],
+        target: dict[int, float],
+        start_vel: dict[int, float],
+        alpha: float,
+        duration: float,
+    ) -> dict[int, float]:
+        """
+        Interpolate using cubic Hermite spline with velocity boundary conditions.
+
+        Uses current velocity at start and zero velocity at target for smooth
+        deceleration even when motors are moving at high speed.
+
+        Args:
+            start: Starting positions per motor
+            target: Target positions per motor
+            start_vel: Starting velocities per motor (rad/s)
+            alpha: Interpolation parameter in [0, 1]
+            duration: Total interpolation duration in seconds
+
+        Returns:
+            Interpolated positions per motor
+        """
+        result = {}
+        for can_id in target:
+            s = start.get(can_id, self._current_positions.get(can_id, 0.0))
+            t = target[can_id]
+            v = start_vel.get(can_id, 0.0)
+
+            # Wrap difference for shortest path
+            diff = (t - s + np.pi) % (2 * np.pi) - np.pi
+            adjusted_target = s + diff
+
+            # Use cubic Hermite spline with current velocity -> zero velocity
+            result[can_id] = cubic_hermite_spline(
+                alpha=alpha,
+                start_pos=s,
+                end_pos=adjusted_target,
+                start_vel=v,
+                end_vel=0.0,
+                duration=duration,
+            )
         return result
 
     def _get_control_params(self, can_id: int) -> dict:
@@ -369,6 +438,7 @@ class SystemIdentification:
         duration: float,
         wait_before: float,
         wait_after: float,
+        method: str = "quintic",
     ) -> None:
         """
         Run an interpolation phase using the async control loop.
@@ -378,8 +448,9 @@ class SystemIdentification:
             start: Starting positions per motor
             target: Target positions per motor
             duration: Interpolation duration in seconds
-            wait_before: Hold at start position for this duration before interpolating
-            wait_after: Hold at target position for this duration after interpolating
+            wait_before: Hold at start before interpolating
+            wait_after: Hold at target after interpolating
+            method: Easing method name (linear, cubic, quintic, etc)
         """
         rate = self.config["chirp"]["sample_rate"]
         total_duration = wait_before + duration + wait_after
@@ -387,6 +458,23 @@ class SystemIdentification:
 
         if num_samples == 0:
             return
+
+        # Check if using velocity-aware hermite interpolation
+        use_hermite = method.lower() == "cubic_hermite"
+
+        # Get easing function for non-hermite methods
+        easing_fn = None
+        if not use_hermite:
+            easing_fn = get_easing_function(method)
+
+        # For hermite interpolation, get current velocities from feedback
+        start_vel: dict[int, float] = {}
+        if use_hermite:
+            # Query latest feedback for velocity data
+            for can_id in target:
+                # Use commanded velocity from last feedback if available
+                vel = self._current_velocities.get(can_id, 0.0)
+                start_vel[can_id] = vel
 
         # Compute sample boundaries for each sub-phase
         wait_before_samples = int(rate * wait_before)
@@ -413,7 +501,17 @@ class SystemIdentification:
                     alpha = 1.0  # Single sample goes directly to target
                 else:
                     alpha = interp_idx / (interp_samples - 1)
-                positions = self._angular_interpolation(start, target, alpha)
+
+                if use_hermite:
+                    # Use velocity-aware Hermite spline
+                    positions = self._hermite_interpolation(
+                        start, target, start_vel, alpha, duration
+                    )
+                else:
+                    # Use standard easing function
+                    positions = self._angular_interpolation(
+                        start, target, alpha, easing_fn
+                    )
             else:
                 # Hold at target position
                 positions = dict(target)  # Copy to avoid mutation
@@ -459,7 +557,9 @@ class SystemIdentification:
 
         # Collect interpolation feedback data
         if self.save_interpolation.get(phase, False):
-            self.interpolation_data[phase] = defaultdict(list, interp_loop.get_feedback_data())
+            self.interpolation_data[phase] = defaultdict(
+                list, interp_loop.get_feedback_data()
+            )
 
         self._end_interp_phase()
 
@@ -468,6 +568,7 @@ class SystemIdentification:
         duration: float = 2.0,
         wait_before: float = 0.0,
         wait_after: float = 0.0,
+        method: str = "quintic",
     ) -> None:
         """Smoothly interpolate from current position to initial chirp position."""
         self._log(1, "\n=== Initialization Phase ===")
@@ -489,10 +590,13 @@ class SystemIdentification:
             duration=duration,
             wait_before=wait_before,
             wait_after=wait_after,
+            method=method,
         )
 
         if self.save_interpolation.get("start", False):
-            start_samples = next((len(v) for v in self.interpolation_data["start"].values() if v), 0)
+            start_samples = next(
+                (len(v) for v in self.interpolation_data["start"].values() if v), 0
+            )
             self._log(2, f"  Collected {start_samples} feedback samples")
 
         self._log(2, "  ✓ Initialization complete\n")
@@ -502,12 +606,15 @@ class SystemIdentification:
         duration: float = 2.0,
         wait_before: float = 0.0,
         wait_after: float = 0.0,
+        method: str = "quintic",
     ) -> None:
         """Smoothly interpolate from current position back to zero."""
         self._log(1, "\n=== Finalization Phase ===")
 
         # Use last commanded positions for smooth command continuity
-        start = {can_id: self.commanded_angles.get(can_id, 0.0) for can_id in self.motor_ids}
+        start = {
+            can_id: self.commanded_angles.get(can_id, 0.0) for can_id in self.motor_ids
+        }
         self._log(2, f"  Last commanded positions: {start}")
         target = {can_id: 0.0 for can_id in self.motor_ids}
 
@@ -521,10 +628,13 @@ class SystemIdentification:
             duration=duration,
             wait_before=wait_before,
             wait_after=wait_after,
+            method=method,
         )
 
         if self.save_interpolation.get("end", False):
-            end_samples = next((len(v) for v in self.interpolation_data["end"].values() if v), 0)
+            end_samples = next(
+                (len(v) for v in self.interpolation_data["end"].values() if v), 0
+            )
             self._log(2, f"  Collected {end_samples} feedback samples")
 
         self._log(2, "  ✓ Finalization complete\n")
@@ -546,7 +656,9 @@ class SystemIdentification:
                 print("\nNo CAN device found. Options:")
                 print("  1. Use MuJoCo simulation:  --mujoco")
                 print("  2. Use dry-run mode:       --dry-run")
-                print("  3. Connect CAN device:     sudo ip link set can0 up type can bitrate 1000000")
+                print(
+                    "  3. Connect CAN device:     sudo ip link set can0 up type can bitrate 1000000"
+                )
                 raise SystemExit(1) from e
             raise
         time.sleep(0.1)
@@ -558,7 +670,9 @@ class SystemIdentification:
         # Initialize generators
         self._setup_generators()
 
-    def _wait_for_connection(self, timeout: float = 30.0, retry_interval: float = 2.0) -> None:
+    def _wait_for_connection(
+        self, timeout: float = 30.0, retry_interval: float = 2.0
+    ) -> None:
         """Wait for motors to respond before proceeding."""
         self._log(2, f"Waiting for motor connection...")
 
@@ -577,7 +691,9 @@ class SystemIdentification:
                 # Always print timeout errors
                 print(f"\nTimeout: No response from motors after {timeout:.0f}s")
                 if self.use_mujoco:
-                    print("  → Start MuJoCo simulation first: python -m hoku.hoku_mujoco")
+                    print(
+                        "  → Start MuJoCo simulation first: python -m hoku.hoku_mujoco"
+                    )
                 else:
                     print("  → Check CAN connection and motor power")
                 raise SystemExit(1)
@@ -592,12 +708,16 @@ class SystemIdentification:
 
             # Wait for responses
             if self.config_received.wait(timeout=retry_interval):
-                self._log(2, f"Received configurations from {len(self.motor_configs)} motors")
+                self._log(
+                    2, f"Received configurations from {len(self.motor_configs)} motors"
+                )
                 return
 
             # Print waiting message
             remaining = timeout - elapsed
-            self._log(2, f"  [{attempt}] Waiting for motors... ({remaining:.0f}s remaining)")
+            self._log(
+                2, f"  [{attempt}] Waiting for motors... ({remaining:.0f}s remaining)"
+            )
 
     def _load_motor_limits(self) -> None:
         """Load motor safety limits from config."""
@@ -667,9 +787,12 @@ class SystemIdentification:
                 duration=chirp_cfg["duration"],
                 sample_rate=chirp_cfg["sample_rate"],
                 sweep_type=chirp_cfg.get("sweep_type", "logarithmic"),
-                scale_1=scale_1, scale_2=scale_2,
-                direction_1=dir_1, direction_2=dir_2,
-                bias_1=bias_1, bias_2=bias_2,
+                scale_1=scale_1,
+                scale_2=scale_2,
+                direction_1=dir_1,
+                direction_2=dir_2,
+                bias_1=bias_1,
+                bias_2=bias_2,
             )
 
             for idx, mid in enumerate(motor_ids):
@@ -682,10 +805,22 @@ class SystemIdentification:
             self._log(2, f"IK group '{name}' initialized:")
             self._log(2, f"  IK type: {ik_type} (inputs: {input_names})")
             self._log(2, f"  Motors: {motor_ids}")
-            self._log(2, f"  {input_names[0]}: scale={scale_1:.3f}, dir={dir_1:+.0f}, bias={bias_1:.3f}")
-            self._log(2, f"    -> amplitude={gen.effective_amplitude_1:.4f} rad, offset={gen.effective_offset_1:.4f} rad")
-            self._log(2, f"  {input_names[1]}: scale={scale_2:.3f}, dir={dir_2:+.0f}, bias={bias_2:.3f}")
-            self._log(2, f"    -> amplitude={gen.effective_amplitude_2:.4f} rad, offset={gen.effective_offset_2:.4f} rad")
+            self._log(
+                2,
+                f"  {input_names[0]}: scale={scale_1:.3f}, dir={dir_1:+.0f}, bias={bias_1:.3f}",
+            )
+            self._log(
+                2,
+                f"    -> amplitude={gen.effective_amplitude_1:.4f} rad, offset={gen.effective_offset_1:.4f} rad",
+            )
+            self._log(
+                2,
+                f"  {input_names[1]}: scale={scale_2:.3f}, dir={dir_2:+.0f}, bias={bias_2:.3f}",
+            )
+            self._log(
+                2,
+                f"    -> amplitude={gen.effective_amplitude_2:.4f} rad, offset={gen.effective_offset_2:.4f} rad",
+            )
 
         return motors_in_ik
 
@@ -696,7 +831,9 @@ class SystemIdentification:
         # Check for overlap
         overlap = motors_in_ik & motors_in_direct
         if overlap:
-            raise ValueError(f"Motors {sorted(overlap)} in both ik_groups and motors config")
+            raise ValueError(
+                f"Motors {sorted(overlap)} in both ik_groups and motors config"
+            )
 
         # Check all motors have config
         missing = set(self.motor_ids) - motors_in_ik - motors_in_direct
@@ -726,14 +863,22 @@ class SystemIdentification:
             )
 
         if self.direct_motors:
-            self._log(2, f"Direct chirp generators for motors: {sorted(self.direct_motors)}")
+            self._log(
+                2, f"Direct chirp generators for motors: {sorted(self.direct_motors)}"
+            )
             for can_id in sorted(self.direct_motors):
                 gen = self.chirp_generators[can_id]
                 mc = motors_cfg[str(can_id)]
-                self._log(2, f"  Motor {can_id}: scale={mc.get('scale', 1.0):.3f}, "
-                      f"dir={mc.get('direction', 1.0):+.0f}, bias={mc.get('bias', 0.0):.3f}")
-                self._log(2, f"    -> amplitude={gen.effective_amplitude:.4f} rad, "
-                      f"offset={gen.effective_offset:.4f} rad")
+                self._log(
+                    2,
+                    f"  Motor {can_id}: scale={mc.get('scale', 1.0):.3f}, "
+                    f"dir={mc.get('direction', 1.0):+.0f}, bias={mc.get('bias', 0.0):.3f}",
+                )
+                self._log(
+                    2,
+                    f"    -> amplitude={gen.effective_amplitude:.4f} rad, "
+                    f"offset={gen.effective_offset:.4f} rad",
+                )
 
     def _generate_control(self) -> tuple[dict[int, ControlData], bool]:
         """Generate control commands for all motors."""
@@ -751,7 +896,7 @@ class SystemIdentification:
 
             group_motors = sorted(
                 [m for m, (g, _) in self.motor_to_ik_group.items() if g == group_name],
-                key=lambda m: self.motor_to_ik_group[m][1]
+                key=lambda m: self.motor_to_ik_group[m][1],
             )
             for i, mid in enumerate(group_motors):
                 if i < len(angles):
@@ -945,19 +1090,31 @@ class SystemIdentification:
 
         total_feedbacks = sum(feedback_counts.values())
         expected_feedbacks = commands_sent * len(self.motor_ids)
-        feedback_rate_pct = (total_feedbacks / expected_feedbacks * 100) \
-            if expected_feedbacks > 0 else 0
+        feedback_rate_pct = (
+            (total_feedbacks / expected_feedbacks * 100)
+            if expected_feedbacks > 0
+            else 0
+        )
 
         # Print results
         self._log(1, "\nResults:")
         self._log(1, f"  Commands sent: {commands_sent}")
-        self._log(1, f"  Actual cmd rate: {actual_cmd_rate:.1f} Hz "
-              f"(target: {target_rate:.0f} Hz, "
-              f"error: {cmd_rate_error * 100:.1f}%)")
-        self._log(1, f"  Missed deadlines: {missed_deadlines} "
-              f"({missed_deadlines / commands_sent * 100:.1f}%)")
-        self._log(1, f"  Total feedbacks: {total_feedbacks}/{expected_feedbacks} "
-              f"({feedback_rate_pct:.1f}%)")
+        self._log(
+            1,
+            f"  Actual cmd rate: {actual_cmd_rate:.1f} Hz "
+            f"(target: {target_rate:.0f} Hz, "
+            f"error: {cmd_rate_error * 100:.1f}%)",
+        )
+        self._log(
+            1,
+            f"  Missed deadlines: {missed_deadlines} "
+            f"({missed_deadlines / commands_sent * 100:.1f}%)",
+        )
+        self._log(
+            1,
+            f"  Total feedbacks: {total_feedbacks}/{expected_feedbacks} "
+            f"({feedback_rate_pct:.1f}%)",
+        )
 
         # Per-motor feedback
         self._log(2, "\n  Per-motor feedback:")
@@ -966,7 +1123,9 @@ class SystemIdentification:
             count = feedback_counts[mid]
             pct = count / commands_sent * 100 if commands_sent > 0 else 0
             status = "✓" if pct >= 95 else "⚠" if pct >= 80 else "✗"
-            self._log(2, f"    Motor {mid}: {count}/{commands_sent} ({pct:.1f}%) {status}")
+            self._log(
+                2, f"    Motor {mid}: {count}/{commands_sent} ({pct:.1f}%) {status}"
+            )
             if pct < 80:
                 all_motors_ok = False
 
@@ -983,7 +1142,9 @@ class SystemIdentification:
         if connection_lost:
             print("\n✗ Connection lost during rate test.")
             print("  The rate may be too high for the remote CAN connection.")
-            print("  Try lowering sample_rate in config (400 Hz recommended for 6 motors)")
+            print(
+                "  Try lowering sample_rate in config (400 Hz recommended for 6 motors)"
+            )
         elif not passed:
             # Always show warnings
             print("\n⚠ Rate test showed potential issues.")
@@ -1051,7 +1212,9 @@ class SystemIdentification:
             if max_passing:
                 self._log(1, f"\n✓ Recommended max rate: {max_passing} Hz")
             else:
-                self._log(1, "\n⚠ All rates had issues. Check connection and try --busy-wait")
+                self._log(
+                    1, "\n⚠ All rates had issues. Check connection and try --busy-wait"
+                )
 
         self._log(1, "=" * 60)
 
@@ -1086,6 +1249,7 @@ class SystemIdentification:
                 duration=start_cfg.get("duration", 2.0),
                 wait_before=start_cfg.get("wait_before", 0.0),
                 wait_after=start_cfg.get("wait_after", 0.0),
+                method=start_cfg.get("method", "quintic"),
             )
         else:
             self._log(2, "\n=== Initialization Phase (skipped) ===\n")
@@ -1119,12 +1283,13 @@ class SystemIdentification:
         self.sample_count = self.async_loop.sample_count
         self.comm_stats = self.async_loop.get_stats()
 
-        # Finalize: smoothly return to zero position (before summary so we have all data)
+        # Finalize: smoothly return to zero position
         if end_cfg.get("enabled", True):
             self._finalize_to_zero(
                 duration=end_cfg.get("duration", 2.0),
                 wait_before=end_cfg.get("wait_before", 0.0),
                 wait_after=end_cfg.get("wait_after", 0.0),
+                method=end_cfg.get("method", "quintic"),
             )
         else:
             self._log(2, "\n=== Finalization Phase (skipped) ===\n")
@@ -1138,7 +1303,9 @@ class SystemIdentification:
         self._log(1, "=" * 60)
         self._log(2, f"Target rate: {expected_rate} Hz")
         self._log(2, f"Duration: {chirp_cfg['duration']} seconds")
-        self._log(2, f"Frequency sweep: {chirp_cfg['f_start']} - {chirp_cfg['f_end']} Hz")
+        self._log(
+            2, f"Frequency sweep: {chirp_cfg['f_start']} - {chirp_cfg['f_end']} Hz"
+        )
         self._log(2, f"Expected samples: {int(expected_rate * chirp_cfg['duration'])}")
         self._log(2, f"Motor CAN IDs: {self.motor_ids}")
         if self.ik_generators:
@@ -1185,16 +1352,25 @@ class SystemIdentification:
         for mid in self.motor_ids:
             fb_count = len(self.feedback_data.get(mid, []))
             pct = (fb_count / self.sample_count * 100) if self.sample_count > 0 else 0
-            self._log(2, f"  Motor {mid}: {fb_count}/{self.sample_count} feedbacks ({pct:.1f}%)")
+            self._log(
+                2,
+                f"  Motor {mid}: {fb_count}/{self.sample_count} feedbacks ({pct:.1f}%)",
+            )
 
         # Print key communication stats at level 1
         if self.async_loop:
             stats = self.comm_stats
             self._log(1, f"\nCommunication stats:")
             self._log(1, f"  Elapsed time: {stats.get('elapsed_time', 0):.2f}s")
-            self._log(1, f"  Missed deadlines: {stats.get('missed_deadlines', 0)} "
-                  f"({stats.get('missed_deadline_pct', 0):.1f}%)")
-            self._log(1, f"  Overall feedback rate: {stats.get('overall_feedback_rate_pct', 0):.1f}%")
+            self._log(
+                1,
+                f"  Missed deadlines: {stats.get('missed_deadlines', 0)} "
+                f"({stats.get('missed_deadline_pct', 0):.1f}%)",
+            )
+            self._log(
+                1,
+                f"  Overall feedback rate: {stats.get('overall_feedback_rate_pct', 0):.1f}%",
+            )
 
         # Print detailed communication stats at level 2
         if self.async_loop and self.verbosity >= 2:
@@ -1203,16 +1379,19 @@ class SystemIdentification:
     def save_results(self, output_file: str) -> None:
         """Save results as JSON."""
         from results import save_json
+
         save_json(self, output_file)
 
     def save_torch(self, output_file: str) -> None:
         """Save results as PyTorch .pt file."""
         from results import save_torch
+
         save_torch(self, output_file)
 
     def save_plots(self, output_dir: str) -> None:
         """Save plots for each motor and IK group."""
         from results import save_plots
+
         save_plots(self, output_dir)
 
     def save_stats(self, output_file: str) -> None:

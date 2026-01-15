@@ -49,13 +49,13 @@ def busy_sleep(duration: float, yield_interval: float = 0.0001) -> None:
 class ControllerProtocol(Protocol):
     """Protocol for motor controllers (real or mock)."""
 
-    def send_kinematics_for_motor(self, can_id: int, control_data: ControlData) -> None:
-        ...
+    def send_kinematics_for_motor(
+        self, can_id: int, control_data: ControlData
+    ) -> None: ...
 
     def set_feedback_callback(
         self, can_id: int, callback: Callable[[int, FeedbackData], None]
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 class AsyncControlLoop:
@@ -111,6 +111,9 @@ class AsyncControlLoop:
         # Current cycle deadline (for latency tracking)
         self._cycle_deadline = 0.0
 
+        # Current sample index for feedback tagging (-1 = not running)
+        self._current_sample = -1
+
         # Progress callback
         self._progress_callback: Callable[[int, float], None] | None = None
 
@@ -127,7 +130,9 @@ class AsyncControlLoop:
         """Set callback for progress updates: callback(sample, progress_pct)."""
         self._progress_callback = callback
 
-    def _create_feedback_callback(self, can_id: int) -> Callable[[int, FeedbackData], None]:
+    def _create_feedback_callback(
+        self, can_id: int
+    ) -> Callable[[int, FeedbackData], None]:
         """Create a feedback callback for a specific motor."""
 
         def callback(cid: int, feedback: FeedbackData) -> None:
@@ -146,7 +151,10 @@ class AsyncControlLoop:
 
         # Build feedback record
         with self._feedback_lock:
-            sample = self.sample_count
+            sample = self._current_sample
+            # Skip if loop not running yet (prevents stray feedback corruption)
+            if sample < 0:
+                return
             fb = asdict(feedback)
             fb["timestamp"] = recv_time - self.start_time
             fb["sample"] = sample
@@ -270,7 +278,7 @@ class AsyncControlLoop:
                 self.running = False
                 break
 
-            # Update commanded angles for feedback annotation
+            # Update commanded angles for feedback annotation (not sample index yet)
             with self._feedback_lock:
                 self._current_commanded = get_commanded_angles()
                 if get_ik_inputs:
@@ -285,6 +293,7 @@ class AsyncControlLoop:
             send_start = time.perf_counter()
             motor_items = list(control_data.items())
             inter_motor_delay = 0.0005 if self.target_period > 0.005 else 0.0
+
             for i, (can_id, data) in enumerate(motor_items):
                 self.stats.record_command_sent(can_id, send_start)
                 self.controller.send_kinematics_for_motor(can_id, data)
@@ -293,6 +302,11 @@ class AsyncControlLoop:
                     time.sleep(inter_motor_delay)
             send_time = time.perf_counter() - send_start
             self.stats.record_send_time(send_time)
+
+            # Set sample index AFTER sending, so feedback from this cycle uses correct index
+            # This must happen BEFORE incrementing sample_count
+            with self._feedback_lock:
+                self._current_sample = self.sample_count
 
             self.sample_count += 1
 
@@ -310,7 +324,12 @@ class AsyncControlLoop:
                 if sleep_time > 0:
                     self._accurate_sleep(sleep_time, last_send_time)
             else:
+                # First iteration: still need to wait for feedback before next cycle
                 self.stats.record_cycle(loop_time, False)
+                elapsed = time.perf_counter() - cycle_start
+                sleep_time = self.target_period - elapsed
+                if sleep_time > 0:
+                    self._accurate_sleep(sleep_time, cycle_start)
 
             last_send_time = time.perf_counter()
 
@@ -327,9 +346,7 @@ class AsyncControlLoop:
         if not silent:
             self._check_final_feedback_status()
 
-    def _accurate_sleep(
-        self, sleep_time: float, last_send_time: float
-    ) -> None:
+    def _accurate_sleep(self, sleep_time: float, last_send_time: float) -> None:
         """
         Sleep accurately using hybrid approach.
 
@@ -360,9 +377,7 @@ class AsyncControlLoop:
             if remaining > 0:
                 busy_sleep(remaining, yield_interval=0.0002)
 
-    def _report_progress(
-        self, get_progress: Callable[[], float] | None
-    ) -> None:
+    def _report_progress(self, get_progress: Callable[[], float] | None) -> None:
         """Report progress to console."""
         elapsed = time.perf_counter() - self.start_time
         intervals = self.sample_count - 1
